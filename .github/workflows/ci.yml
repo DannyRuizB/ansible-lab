@@ -58,10 +58,7 @@ jobs:
         run: ansible-playbook playbooks/02_informe_sistema.yml
 
       - name: "Playbook 3 — despliegue simulado (1ª pasada)"
-        run: |
-          # En el runner el playbook crea el entorno en el HOME del runner
-          mkdir -p "$HOME/ansible-lab"
-          ansible-playbook playbooks/03_desplegar_app_simulada.yml
+        run: ansible-playbook playbooks/03_desplegar_app_simulada.yml
 
       - name: "Playbook 3 — 2ª pasada: comprobar idempotencia (changed=0)"
         run: |
@@ -96,10 +93,53 @@ jobs:
         with:
           path: _site/
 
+  multihost:
+    name: Flota multi-host (Docker + SSH)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v5
+
+      - name: Instalar ansible-core
+        run: pipx install ansible-core
+
+      - name: Levantar la flota (3 contenedores con SSH)
+        run: ./flota.sh up
+
+      - name: Esperar a que el SSH de los nodos responda
+        run: |
+          for puerto in 2201 2202 2203; do
+            for i in $(seq 1 15); do
+              if ssh -i .ssh_lab/id_lab -p "$puerto" \
+                  -o StrictHostKeyChecking=accept-new \
+                  -o UserKnownHostsFile=.ssh_lab/known_hosts \
+                  -o ConnectTimeout=2 ansible@127.0.0.1 true 2>/dev/null; then
+                echo "Puerto $puerto: SSH OK"; break
+              fi
+              [ "$i" = 15 ] && { echo "::error::SSH no responde en $puerto"; exit 1; }
+              sleep 2
+            done
+          done
+
+      - name: "Playbook 7 — desplegar en toda la flota (1ª pasada)"
+        run: ansible-playbook -i inventario_flota.ini playbooks/07_flota_multihost.yml
+
+      - name: "Playbook 7 — 2ª pasada: idempotencia en los 3 nodos"
+        run: |
+          salida=$(ansible-playbook -i inventario_flota.ini playbooks/07_flota_multihost.yml)
+          echo "$salida" | tail -6
+          ceros=$(echo "$salida" | grep -c "changed=0" || true)
+          [ "$ceros" = "3" ] || { echo "::error::Algún nodo no fue idempotente"; exit 1; }
+
+      - name: Apagar la flota
+        if: always()
+        run: ./flota.sh down
+
   publicar:
     name: Publicar demo en GitHub Pages
     if: github.ref == 'refs/heads/main'
-    needs: ejecutar
+    # La demo solo se publica si TODOS los checks pasan: lint, playbooks y flota
+    needs: [lint, ejecutar, multihost]
     runs-on: ubuntu-latest
     permissions:
       pages: write

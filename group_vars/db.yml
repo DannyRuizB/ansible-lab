@@ -1,0 +1,6 @@
+---
+# Variables del grupo [db]
+app_nombre: "miapp-db"
+app_puerto: 5432
+app_entorno: "produccion"
+rol_del_nodo: "base de datos"

@@ -1,0 +1,76 @@
+---
+# =============================================================================
+# Playbook 7 — Gestionar una flota multi-host por SSH
+#
+# Hasta ahora todo era localhost; aquí Ansible gestiona VARIOS "servidores"
+# a la vez (contenedores Docker con SSH, levantados con ./flota.sh up) igual
+# que gestionaría servidores reales:
+#
+#   - conexión SSH real ........ clave privada, puerto y usuario del inventario
+#   - grupos e inventario ...... [web] y [db] con variables por grupo
+#   - paralelismo .............. las tareas se ejecutan en todos los nodos a la vez
+#   - group_names / hostvars ... cada nodo sabe a qué grupo pertenece
+#
+# Ejecutar (requiere la flota arriba):
+#   ./flota.sh up
+#   ansible-playbook -i inventario_flota.ini playbooks/07_flota_multihost.yml
+#
+# Al terminar puedes apagar la flota:  ./flota.sh down
+# =============================================================================
+
+- name: Desplegar la app simulada en toda la flota
+  hosts: flota
+  gather_facts: true
+
+  vars:
+    app_base: "/home/ansible/{{ app_nombre }}"
+
+  tasks:
+    - name: Comprobar conectividad SSH con cada nodo
+      ansible.builtin.ping:
+
+    - name: Crear la estructura de la aplicación (en cada nodo)
+      ansible.builtin.file:
+        path: "{{ app_base }}/{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - config
+        - logs
+
+    - name: Generar la configuración según el grupo del nodo
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/app.conf.j2"
+        dest: "{{ app_base }}/config/{{ app_nombre }}.conf"
+        mode: "0644"
+      notify: Reiniciar servicio simulado
+      # La misma plantilla que en localhost, pero cada nodo la rellena con
+      # SUS variables de grupo: los web con puerto 8080, el db con 5432.
+
+    - name: Registrar el rol del nodo en el .env
+      ansible.builtin.lineinfile:
+        path: "{{ app_base }}/config/.env"
+        line: "ROL_NODO={{ rol_del_nodo }}"
+        regexp: "^ROL_NODO="
+        create: true
+        mode: "0644"
+      notify: Reiniciar servicio simulado
+
+    - name: Resumen de la flota (una sola vez, desde el controlador)
+      ansible.builtin.debug:
+        msg: >-
+          Flota desplegada:
+          {% for h in ansible_play_hosts %}
+          {{ h }} ({{ hostvars[h]['group_names'] | difference(['flota']) | join(',') }})
+          → {{ hostvars[h]['app_nombre'] }}:{{ hostvars[h]['app_puerto'] }}
+          {% endfor %}
+      run_once: true
+      # run_once + hostvars: la tarea se ejecuta una vez pero puede leer los
+      # datos de todos los nodos del play.
+
+  handlers:
+    - name: Reiniciar servicio simulado
+      ansible.builtin.copy:
+        dest: "{{ app_base }}/logs/ultimo_reinicio.log"
+        content: "Servicio {{ app_nombre }} 'reiniciado' en {{ ansible_facts['hostname'] }}.\n"
+        mode: "0644"

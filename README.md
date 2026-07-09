@@ -4,7 +4,10 @@
 ![Ansible](https://img.shields.io/badge/ansible--core-2.21-black?logo=ansible)
 ![Lint](https://img.shields.io/badge/ansible--lint-perfil%20production-brightgreen)
 
-Laboratorio de aprendizaje de **Ansible** que funciona **100% en local**: el único "servidor" gestionado es la propia máquina (`localhost` con `ansible_connection=local`). No necesita SSH, ni servidores remotos, ni permisos de administrador — todo ocurre dentro del directorio del proyecto.
+Laboratorio de aprendizaje de **Ansible** que funciona **100% en local**, en dos niveles:
+
+- **Playbooks 1-6**: el "servidor" gestionado es la propia máquina (`localhost` con `ansible_connection=local`). Sin SSH, sin servidores remotos, sin permisos de administrador — todo ocurre dentro del directorio del proyecto.
+- **Playbook 7 (opcional)**: una "flota" de 3 contenedores Docker locales gestionados **por SSH real**, para practicar inventarios multi-host. Requiere Docker, pero sigue siendo local: los contenedores solo escuchan en `127.0.0.1`.
 
 Forma parte de mi formación en automatización/DevOps con perfil de administración de sistemas (ASIR).
 
@@ -20,6 +23,7 @@ Forma parte de mi formación en automatización/DevOps con perfil de administrac
 | `playbooks/04_panel_web_con_rol.yml` | **Roles** — la estructura estándar de Ansible (`tasks/`, `templates/`, `defaults/`, `meta/`): el rol `informe_web` genera un panel HTML con tarjetas y barras de ocupación de disco |
 | `playbooks/05_auditoria_salud.yml` | Auditoría de **solo lectura** (como los `status.yml` de producción): **assert** con umbrales configurables, **when**, **stat**, `set_fact` y filtros Jinja (`selectattr`, `map`) |
 | `playbooks/06_secretos_vault.yml` | **ansible-vault** — `vars/secretos.yml` vive cifrado en el repo, se descifra en ejecución (`vars_files`) y se aplica con **no_log** para que los valores nunca salgan por pantalla ni logs |
+| `playbooks/07_flota_multihost.yml` | **Multi-host por SSH real** — 3 contenedores Docker locales como nodos gestionados: inventario con grupos `[web]`/`[db]`, **group_vars**, paralelismo y resumen con `run_once` + `hostvars` |
 
 ## 📁 Estructura
 
@@ -29,13 +33,20 @@ ansible-lab/
 ├── inventario.ini                       # inventario: localhost con conexión local
 ├── .ansible-lint                        # configuración del linter (perfil, excepciones)
 ├── .github/workflows/ci.yml             # CI: lint + ejecución real de los playbooks
+├── inventario_flota.ini                 # inventario multi-host (grupos web/db)
+├── flota.sh                             # levantar/apagar los 3 nodos Docker
+├── multihost/Dockerfile                 # imagen de nodo: Debian + sshd + python3
+├── group_vars/
+│   ├── web.yml                          # variables del grupo [web]
+│   └── db.yml                           # variables del grupo [db]
 ├── playbooks/
 │   ├── 01_ping.yml
 │   ├── 02_informe_sistema.yml
 │   ├── 03_desplegar_app_simulada.yml
 │   ├── 04_panel_web_con_rol.yml
 │   ├── 05_auditoria_salud.yml
-│   └── 06_secretos_vault.yml
+│   ├── 06_secretos_vault.yml
+│   └── 07_flota_multihost.yml
 ├── vars/
 │   └── secretos.yml                     # secretos CIFRADOS con ansible-vault
 ├── roles/
@@ -55,7 +66,7 @@ Los directorios `informes/` y `entorno-prueba/` los crean los playbooks y no se 
 
 ## 🚀 Uso
 
-Requisitos: Linux (o WSL) con Ansible instalado (`pip install --user ansible`).
+Requisitos: Linux (o WSL) con Ansible instalado (`pip install --user ansible`). Para el playbook 7, además Docker (ver su sección).
 
 ```bash
 git clone git@github.com:DannyRuizB/ansible-lab.git
@@ -82,6 +93,19 @@ ansible-playbook playbooks/06_secretos_vault.yml --ask-vault-pass
 # Ver o editar el fichero cifrado
 ansible-vault view vars/secretos.yml --ask-vault-pass
 ```
+
+## 🚢 Flota multi-host (playbook 7)
+
+El único playbook que sale de `localhost`: gestiona **3 "servidores" con SSH de verdad** — contenedores Docker locales (`web1`, `web2`, `db1`) que escuchan solo en `127.0.0.1`. Requiere Docker (en WSL: `sudo apt-get install -y docker.io && sudo usermod -aG docker $USER`, y reabrir la terminal).
+
+```bash
+./flota.sh up          # clave SSH del lab + imagen + 3 contenedores
+ansible -i inventario_flota.ini flota -m ping
+ansible-playbook -i inventario_flota.ini playbooks/07_flota_multihost.yml
+./flota.sh down        # apagar y eliminar la flota (no queda nada corriendo)
+```
+
+Cada nodo recibe la configuración de **su grupo** (`group_vars/web.yml` y `group_vars/db.yml`): los `web` despliegan `miapp-web:8080` y el `db`, `miapp-db:5432`. El CI levanta esta misma flota en cada push y verifica la idempotencia en los 3 nodos.
 
 ### Cosas que probar
 
@@ -116,7 +140,7 @@ En cada push, GitHub Actions ([`ci.yml`](.github/workflows/ci.yml)):
 
 1. Pasa **ansible-lint** (el proyecto cumple el perfil `production`).
 2. Comprueba la **sintaxis** de todos los playbooks.
-3. **Ejecuta los 5 playbooks de verdad** en el runner (al ser un laboratorio contra `localhost`, el CI es también el entorno de pruebas).
+3. **Ejecuta los playbooks de verdad** en el runner (al ser un laboratorio contra `localhost`, el CI es también el entorno de pruebas) y **levanta la flota Docker** para probar el multi-host por SSH.
 4. Verifica la **idempotencia**: la segunda pasada del playbook 3 debe terminar con `changed=0` o el pipeline falla.
 5. Publica los informes generados como artefacto descargable.
 6. **Despliega el panel HTML en GitHub Pages** → [demo en vivo](https://dannyruizb.github.io/ansible-lab/).

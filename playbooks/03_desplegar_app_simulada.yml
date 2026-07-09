@@ -11,7 +11,7 @@
 #   - blockinfile ....... añadir un bloque con marcador "ANSIBLE MANAGED"
 #   - handlers + notify . "reiniciar" el servicio SOLO si la config cambió
 #
-# Todo ocurre dentro de ~/ansible-lab/entorno-prueba (borrable sin riesgo).
+# Todo ocurre dentro de entorno-prueba/ en el repositorio (borrable sin riesgo).
 #
 # Ejecutar:        ansible-playbook playbooks/03_desplegar_app_simulada.yml
 # Simulación:      ansible-playbook playbooks/03_desplegar_app_simulada.yml --check --diff
@@ -26,7 +26,8 @@
     app_nombre: "miapp"
     app_puerto: 8080
     app_entorno: "produccion"
-    app_base: "{{ ansible_facts['user_dir'] }}/ansible-lab/entorno-prueba/{{ app_nombre }}"
+    # playbook_dir/../ = la raíz del repositorio, esté clonado donde esté
+    app_base: "{{ playbook_dir }}/../entorno-prueba/{{ app_nombre }}"
 
   tasks:
     - name: Crear la estructura de carpetas de la aplicación (loop)

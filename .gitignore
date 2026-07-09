@@ -5,3 +5,6 @@ entorno-prueba/
 # Ansible
 *.retry
 .vault_pass
+
+# Clave SSH y known_hosts del laboratorio multi-host (los genera flota.sh)
+.ssh_lab/
