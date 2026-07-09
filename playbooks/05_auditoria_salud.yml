@@ -57,7 +57,7 @@
 
     - name: Comprobar si existe la app simulada del playbook 3
       ansible.builtin.stat:
-        path: "{{ ansible_facts['user_dir'] }}/ansible-lab/entorno-prueba/miapp/config/miapp.conf"
+        path: "{{ playbook_dir }}/../entorno-prueba/miapp/config/miapp.conf"
       register: config_miapp
 
     - name: Avisar si la app simulada no está desplegada (when)

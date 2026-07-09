@@ -1,0 +1,8 @@
+---
+# Variables del grupo [web]: se aplican automáticamente a todos sus hosts.
+# Es el mismo mecanismo que usa un inventario de producción para dar valores
+# distintos a comercializadoras, distribuidoras, etc.
+app_nombre: "miapp-web"
+app_puerto: 8080
+app_entorno: "produccion"
+rol_del_nodo: "frontal web"
