@@ -1,0 +1,29 @@
+---
+# =============================================================================
+# Playbook 1 — Primer contacto
+#
+# Comprueba que Ansible puede "conectar" con los hosts del inventario y
+# muestra algunos datos básicos (facts) de la máquina.
+#
+# Ejecutar desde la raíz del laboratorio:
+#   ansible-playbook playbooks/01_ping.yml
+# =============================================================================
+
+- name: Primer contacto con el laboratorio
+  hosts: laboratorio          # grupo definido en inventario.ini
+  gather_facts: yes           # recopila los "facts" (SO, RAM, IPs...)
+
+  tasks:
+    - name: Comprobar conectividad (módulo ping)
+      ansible.builtin.ping:
+      # No es un ping ICMP: verifica que Ansible puede ejecutar Python
+      # en el host. Si responde "pong", todo está bien.
+
+    - name: Mostrar información básica del sistema (facts)
+      ansible.builtin.debug:
+        msg:
+          - "Sistema: {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}"
+          - "Kernel: {{ ansible_facts['kernel'] }}"
+          - "Hostname: {{ ansible_facts['hostname'] }}"
+          - "Memoria total: {{ ansible_facts['memtotal_mb'] }} MB"
+          - "CPUs: {{ ansible_facts['processor_vcpus'] }}"

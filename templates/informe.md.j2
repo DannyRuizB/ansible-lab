@@ -1,0 +1,35 @@
+# Informe del sistema — {{ ansible_facts['hostname'] }}
+
+> Generado con Ansible por {{ autor }}.
+> Plantilla: `templates/informe.md.j2`
+
+## Sistema operativo
+
+| Dato | Valor |
+|---|---|
+| Distribución | {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }} |
+| Kernel | {{ ansible_facts['kernel'] }} |
+| Arquitectura | {{ ansible_facts['architecture'] }} |
+| Python | {{ ansible_facts['python_version'] }} |
+
+## Hardware
+
+| Dato | Valor |
+|---|---|
+| CPUs (vcores) | {{ ansible_facts['processor_vcpus'] }} |
+| Memoria total | {{ ansible_facts['memtotal_mb'] }} MB |
+| Memoria libre | {{ ansible_facts['memfree_mb'] }} MB |
+
+## Discos montados
+
+| Punto de montaje | Tamaño | Libre |
+|---|---|---|
+{% for m in ansible_facts['mounts'] if m['size_total'] is defined and m['size_total'] > 0 %}
+| {{ m['mount'] }} | {{ (m['size_total'] / 1024 / 1024 / 1024) | round(1) }} GB | {{ (m['size_available'] / 1024 / 1024 / 1024) | round(1) }} GB |
+{% endfor %}
+
+## Usuario y entorno
+
+- Usuario efectivo: `{{ ansible_facts['user_id'] }}`
+- Directorio home: `{{ ansible_facts['user_dir'] }}`
+- Shell: `{{ ansible_facts['user_shell'] }}`

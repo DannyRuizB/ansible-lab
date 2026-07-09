@@ -1,0 +1,89 @@
+---
+# =============================================================================
+# Playbook 3 — "Despliegue" de una aplicación simulada
+#
+# Reproduce en miniatura (y sin tocar nada del sistema) el patrón de un
+# despliegue real, con las técnicas que usa el equipo de Sistemas:
+#
+#   - loop .............. crear varias carpetas con una sola tarea
+#   - template + vars ... generar el fichero de configuración
+#   - lineinfile ........ añadir una línea idempotente a un .env
+#   - blockinfile ....... añadir un bloque con marcador "ANSIBLE MANAGED"
+#   - handlers + notify . "reiniciar" el servicio SOLO si la config cambió
+#
+# Todo ocurre dentro de ~/ansible-lab/entorno-prueba (borrable sin riesgo).
+#
+# Ejecutar:        ansible-playbook playbooks/03_desplegar_app_simulada.yml
+# Simulación:      ansible-playbook playbooks/03_desplegar_app_simulada.yml --check --diff
+# Cambiar valores: ansible-playbook playbooks/03_desplegar_app_simulada.yml -e "app_puerto=9090"
+# =============================================================================
+
+- name: Desplegar aplicación simulada
+  hosts: laboratorio
+  gather_facts: yes
+
+  vars:
+    app_nombre: "miapp"
+    app_puerto: 8080
+    app_entorno: "produccion"
+    app_base: "{{ ansible_facts['user_dir'] }}/ansible-lab/entorno-prueba/{{ app_nombre }}"
+
+  tasks:
+    - name: Crear la estructura de carpetas de la aplicación (loop)
+      ansible.builtin.file:
+        path: "{{ app_base }}/{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - config
+        - logs
+        - releases
+        - shared
+
+    - name: Generar el fichero de configuración desde plantilla
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/app.conf.j2"
+        dest: "{{ app_base }}/config/{{ app_nombre }}.conf"
+        mode: "0644"
+      notify: reiniciar servicio simulado
+      # notify: si (y solo si) esta tarea cambia algo, al final del play
+      # se ejecutará el handler. Si la config no cambió, no hay "reinicio".
+
+    - name: Asegurar la variable APP_ENV en el .env (lineinfile)
+      ansible.builtin.lineinfile:
+        path: "{{ app_base }}/config/.env"
+        line: "APP_ENV={{ app_entorno }}"
+        regexp: "^APP_ENV="
+        create: yes
+        mode: "0644"
+      notify: reiniciar servicio simulado
+
+    - name: Añadir bloque de supervisión al .env (blockinfile con marcador)
+      ansible.builtin.blockinfile:
+        path: "{{ app_base }}/config/.env"
+        marker: "# {mark} ANSIBLE MANAGED - supervision"
+        block: |
+          SUPERVISOR_ENABLED=true
+          SUPERVISOR_QUEUE={{ app_nombre }}-colas
+      notify: reiniciar servicio simulado
+      # El marcador hace la tarea idempotente: por muchas veces que se
+      # ejecute, el bloque solo existe una vez (igual que hace el equipo
+      # de Sistemas en los playbooks de colas de Supervisor).
+
+    - name: Comprobar el estado final de la configuración
+      ansible.builtin.command: cat {{ app_base }}/config/.env
+      register: resultado_env      # guarda la salida en una variable
+      changed_when: false          # leer un fichero nunca es un "cambio"
+
+    - name: Mostrar la configuración resultante
+      ansible.builtin.debug:
+        msg: "{{ resultado_env.stdout_lines }}"
+
+  handlers:
+    - name: reiniciar servicio simulado
+      ansible.builtin.copy:
+        dest: "{{ app_base }}/logs/ultimo_reinicio.log"
+        content: "Servicio {{ app_nombre }} 'reiniciado' por cambio de configuración.\n"
+        mode: "0644"
+      # En un servidor real esto sería: service/systemd state=restarted.
+      # Aquí lo simulamos dejando constancia en un log.

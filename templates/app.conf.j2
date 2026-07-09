@@ -1,0 +1,17 @@
+# Configuración de {{ app_nombre }} — generada por Ansible, no editar a mano
+# (los cambios manuales se pierden en la siguiente ejecución del playbook)
+
+[servidor]
+nombre    = {{ app_nombre }}
+puerto    = {{ app_puerto }}
+entorno   = {{ app_entorno }}
+host      = {{ ansible_facts['hostname'] }}
+
+[recursos]
+# Valores calculados a partir de los facts de la máquina
+workers   = {{ ansible_facts['processor_vcpus'] }}
+memoria_mb = {{ (ansible_facts['memtotal_mb'] * 0.25) | round | int }}
+
+[rutas]
+logs      = {{ app_base }}/logs
+releases  = {{ app_base }}/releases

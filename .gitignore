@@ -1,0 +1,6 @@
+# Salidas generadas por los playbooks (se recrean al ejecutarlos)
+informes/
+entorno-prueba/
+
+# Ansible
+*.retry

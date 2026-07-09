@@ -1,0 +1,41 @@
+---
+# =============================================================================
+# Playbook 2 — Informe del sistema con plantilla Jinja2
+#
+# Demuestra el uso de FACTS + TEMPLATE: recopila datos de la máquina y
+# genera un informe en Markdown rellenando la plantilla
+# templates/informe.md.j2 con los valores reales.
+#
+# Es idempotente: si el informe no cambia, la segunda ejecución dirá "ok"
+# en lugar de "changed".
+#
+# Ejecutar:
+#   ansible-playbook playbooks/02_informe_sistema.yml
+# =============================================================================
+
+- name: Generar informe del sistema
+  hosts: laboratorio
+  gather_facts: yes
+
+  vars:
+    # Las variables se pueden sobreescribir al ejecutar:
+    #   ansible-playbook playbooks/02_informe_sistema.yml -e "autor=Otro"
+    autor: "Danny"
+    carpeta_informes: "{{ playbook_dir }}/../informes"
+
+  tasks:
+    - name: Asegurar que existe la carpeta de informes
+      ansible.builtin.file:
+        path: "{{ carpeta_informes }}"
+        state: directory
+        mode: "0755"
+
+    - name: Generar el informe desde la plantilla Jinja2
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/informe.md.j2"
+        dest: "{{ carpeta_informes }}/informe_{{ ansible_facts['hostname'] }}.md"
+        mode: "0644"
+
+    - name: Indicar dónde ha quedado el informe
+      ansible.builtin.debug:
+        msg: "Informe generado en informes/informe_{{ ansible_facts['hostname'] }}.md"
