@@ -20,7 +20,7 @@
 
 - name: Desplegar aplicación simulada
   hosts: laboratorio
-  gather_facts: yes
+  gather_facts: true
 
   vars:
     app_nombre: "miapp"
@@ -45,7 +45,7 @@
         src: "{{ playbook_dir }}/../templates/app.conf.j2"
         dest: "{{ app_base }}/config/{{ app_nombre }}.conf"
         mode: "0644"
-      notify: reiniciar servicio simulado
+      notify: Reiniciar servicio simulado
       # notify: si (y solo si) esta tarea cambia algo, al final del play
       # se ejecutará el handler. Si la config no cambió, no hay "reinicio".
 
@@ -54,9 +54,9 @@
         path: "{{ app_base }}/config/.env"
         line: "APP_ENV={{ app_entorno }}"
         regexp: "^APP_ENV="
-        create: yes
+        create: true
         mode: "0644"
-      notify: reiniciar servicio simulado
+      notify: Reiniciar servicio simulado
 
     - name: Añadir bloque de supervisión al .env (blockinfile con marcador)
       ansible.builtin.blockinfile:
@@ -65,7 +65,7 @@
         block: |
           SUPERVISOR_ENABLED=true
           SUPERVISOR_QUEUE={{ app_nombre }}-colas
-      notify: reiniciar servicio simulado
+      notify: Reiniciar servicio simulado
       # El marcador hace la tarea idempotente: por muchas veces que se
       # ejecute, el bloque solo existe una vez (igual que hace el equipo
       # de Sistemas en los playbooks de colas de Supervisor).
@@ -80,7 +80,7 @@
         msg: "{{ resultado_env.stdout_lines }}"
 
   handlers:
-    - name: reiniciar servicio simulado
+    - name: Reiniciar servicio simulado
       ansible.builtin.copy:
         dest: "{{ app_base }}/logs/ultimo_reinicio.log"
         content: "Servicio {{ app_nombre }} 'reiniciado' por cambio de configuración.\n"

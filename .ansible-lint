@@ -1,0 +1,13 @@
+---
+# Configuración de ansible-lint para este proyecto
+profile: shared
+
+skip_list:
+  # Los playbooks viven en playbooks/ y las plantillas compartidas en
+  # templates/, por lo que el src usa "{{ playbook_dir }}/../templates/...".
+  # La regla lo marca como ruta relativa, pero aquí es intencionado.
+  - no-relative-paths
+
+exclude_paths:
+  - informes/
+  - entorno-prueba/

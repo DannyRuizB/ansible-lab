@@ -11,7 +11,7 @@
 
 - name: Primer contacto con el laboratorio
   hosts: laboratorio          # grupo definido en inventario.ini
-  gather_facts: yes           # recopila los "facts" (SO, RAM, IPs...)
+  gather_facts: true           # recopila los "facts" (SO, RAM, IPs...)
 
   tasks:
     - name: Comprobar conectividad (módulo ping)

@@ -15,7 +15,7 @@
 
 - name: Generar informe del sistema
   hosts: laboratorio
-  gather_facts: yes
+  gather_facts: true
 
   vars:
     # Las variables se pueden sobreescribir al ejecutar:

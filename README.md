@@ -1,5 +1,9 @@
 # 🧪 Ansible Lab — laboratorio local de automatización
 
+[![CI](https://github.com/DannyRuizB/ansible-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/DannyRuizB/ansible-lab/actions/workflows/ci.yml)
+![Ansible](https://img.shields.io/badge/ansible--core-2.21-black?logo=ansible)
+![Lint](https://img.shields.io/badge/ansible--lint-perfil%20production-brightgreen)
+
 Laboratorio de aprendizaje de **Ansible** que funciona **100% en local**: el único "servidor" gestionado es la propia máquina (`localhost` con `ansible_connection=local`). No necesita SSH, ni servidores remotos, ni permisos de administrador — todo ocurre dentro del directorio del proyecto.
 
 Forma parte de mi formación en automatización/DevOps con perfil de administración de sistemas (ASIR).
@@ -11,21 +15,33 @@ Forma parte de mi formación en automatización/DevOps con perfil de administrac
 | `playbooks/01_ping.yml` | Inventario, módulo `ping`, **facts** y `debug` |
 | `playbooks/02_informe_sistema.yml` | **Templates Jinja2** — genera un informe Markdown del sistema (SO, hardware, discos) rellenando `templates/informe.md.j2` con los facts reales |
 | `playbooks/03_desplegar_app_simulada.yml` | Un "despliegue" en miniatura: **loop**, **template con variables**, **lineinfile**/**blockinfile** idempotentes con marcador, **register**/**changed_when** y **handlers con notify** (el "servicio" solo se "reinicia" si la configuración cambió) |
+| `playbooks/04_panel_web_con_rol.yml` | **Roles** — la estructura estándar de Ansible (`tasks/`, `templates/`, `defaults/`, `meta/`): el rol `informe_web` genera un panel HTML con tarjetas y barras de ocupación de disco |
+| `playbooks/05_auditoria_salud.yml` | Auditoría de **solo lectura** (como los `status.yml` de producción): **assert** con umbrales configurables, **when**, **stat**, `set_fact` y filtros Jinja (`selectattr`, `map`) |
 
 ## 📁 Estructura
 
 ```
 ansible-lab/
-├── ansible.cfg                          # configuración (inventario por defecto, formato de salida)
+├── ansible.cfg                          # configuración (inventario por defecto, roles_path...)
 ├── inventario.ini                       # inventario: localhost con conexión local
+├── .ansible-lint                        # configuración del linter (perfil, excepciones)
+├── .github/workflows/ci.yml             # CI: lint + ejecución real de los playbooks
 ├── playbooks/
 │   ├── 01_ping.yml
 │   ├── 02_informe_sistema.yml
-│   └── 03_desplegar_app_simulada.yml
+│   ├── 03_desplegar_app_simulada.yml
+│   ├── 04_panel_web_con_rol.yml
+│   └── 05_auditoria_salud.yml
+├── roles/
+│   └── informe_web/                     # rol: panel HTML del sistema
+│       ├── tasks/main.yml
+│       ├── templates/panel.html.j2
+│       ├── defaults/main.yml
+│       └── meta/main.yml
 ├── templates/
 │   ├── informe.md.j2                    # plantilla del informe del sistema
 │   └── app.conf.j2                      # plantilla de configuración de la app simulada
-├── informes/                            # (generado) informes de salida
+├── informes/                            # (generado) informes y panel de salida
 └── entorno-prueba/                      # (generado) la "aplicación" desplegada
 ```
 
@@ -47,6 +63,12 @@ ansible-playbook playbooks/02_informe_sistema.yml
 
 # 3. Despliegue simulado
 ansible-playbook playbooks/03_desplegar_app_simulada.yml
+
+# 4. Panel HTML del sistema (rol) — queda en informes/panel_<hostname>.html
+ansible-playbook playbooks/04_panel_web_con_rol.yml
+
+# 5. Auditoría de salud (solo lectura, nunca cambia nada)
+ansible-playbook playbooks/05_auditoria_salud.yml
 ```
 
 ### Cosas que probar
@@ -76,7 +98,18 @@ ansible laboratorio -m setup -a "filter=*mem*"
 rm -rf entorno-prueba informes
 ```
 
+## ✅ Integración continua
+
+En cada push, GitHub Actions ([`ci.yml`](.github/workflows/ci.yml)):
+
+1. Pasa **ansible-lint** (el proyecto cumple el perfil `production`).
+2. Comprueba la **sintaxis** de todos los playbooks.
+3. **Ejecuta los 5 playbooks de verdad** en el runner (al ser un laboratorio contra `localhost`, el CI es también el entorno de pruebas).
+4. Verifica la **idempotencia**: la segunda pasada del playbook 3 debe terminar con `changed=0` o el pipeline falla.
+5. Publica los informes generados como artefacto descargable.
+
 ## 📝 Notas
 
 - Sintaxis moderna de facts (`ansible_facts['distribution']` en lugar de `ansible_distribution`), compatible con ansible-core ≥ 2.21.
 - Los patrones del playbook 3 (marcadores `blockinfile`, handlers, variables sobreescribibles) son los mismos que se usan en entornos reales de producción, solo que aquí el "servicio" es simulado.
+- El playbook 5 se puede "endurecer" para verlo fallar: `ansible-playbook playbooks/05_auditoria_salud.yml -e "umbral_disco_pct=1"`.

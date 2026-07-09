@@ -1,0 +1,71 @@
+---
+# CI del laboratorio: en cada push/PR se valida el código Ansible y,
+# como el laboratorio funciona contra localhost, los playbooks se
+# EJECUTAN de verdad en el runner de GitHub (incluida la prueba de
+# idempotencia: la segunda pasada no debe cambiar nada).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    name: Lint (ansible-lint)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v4
+
+      - name: Instalar ansible-lint
+        run: pipx install ansible-lint && pipx inject ansible-lint ansible-core
+
+      - name: Ejecutar ansible-lint
+        run: ansible-lint
+
+  ejecutar:
+    name: Ejecutar playbooks (localhost)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v4
+
+      - name: Instalar ansible-core
+        run: pipx install ansible-core
+
+      - name: Comprobar sintaxis de todos los playbooks
+        run: |
+          for pb in playbooks/*.yml; do
+            ansible-playbook --syntax-check "$pb"
+          done
+
+      - name: "Playbook 1 — ping y facts"
+        run: ansible-playbook playbooks/01_ping.yml
+
+      - name: "Playbook 2 — informe del sistema"
+        run: ansible-playbook playbooks/02_informe_sistema.yml
+
+      - name: "Playbook 3 — despliegue simulado (1ª pasada)"
+        run: |
+          # En el runner el playbook crea el entorno en el HOME del runner
+          mkdir -p "$HOME/ansible-lab"
+          ansible-playbook playbooks/03_desplegar_app_simulada.yml
+
+      - name: "Playbook 3 — 2ª pasada: comprobar idempotencia (changed=0)"
+        run: |
+          salida=$(ansible-playbook playbooks/03_desplegar_app_simulada.yml)
+          echo "$salida" | tail -3
+          echo "$salida" | grep -q "changed=0" || { echo "::error::El playbook no es idempotente"; exit 1; }
+
+      - name: "Playbook 4 — panel web con rol"
+        run: ansible-playbook playbooks/04_panel_web_con_rol.yml
+
+      - name: "Playbook 5 — auditoría de salud"
+        run: ansible-playbook playbooks/05_auditoria_salud.yml
+
+      - name: Publicar los informes generados como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: informes
+          path: informes/
