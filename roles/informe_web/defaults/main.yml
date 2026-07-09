@@ -1,0 +1,8 @@
+---
+# Variables por defecto del rol (las de menor prioridad: cualquier
+# playbook o -e las puede sobreescribir)
+informe_web_titulo: "Panel del sistema"
+informe_web_autor: "Danny"
+informe_web_destino: "{{ playbook_dir }}/../informes"
+# Umbral a partir del cual un disco se pinta en rojo en el panel
+informe_web_umbral_disco_pct: 80

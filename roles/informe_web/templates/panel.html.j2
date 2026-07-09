@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>{{ informe_web_titulo }} — {{ ansible_facts['hostname'] }}</title>
+<style>
+  body { font-family: "Segoe UI", Arial, sans-serif; background: #0b0f13; color: #e8edf2; margin: 0; padding: 30px 16px; }
+  .panel { max-width: 860px; margin: 0 auto; }
+  h1 { color: #5dade2; border-bottom: 3px solid #3498db; padding-bottom: 8px; }
+  .meta { color: #97a6b5; font-size: 0.9em; margin-bottom: 24px; }
+  .tarjetas { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 26px; }
+  .tarjeta { background: #151b22; border: 1px solid #32404e; border-radius: 10px; padding: 16px 18px; }
+  .tarjeta .valor { font-size: 1.5em; font-weight: 700; color: #fff; }
+  .tarjeta .etiqueta { color: #97a6b5; font-size: 0.85em; margin-top: 2px; }
+  table { border-collapse: collapse; width: 100%; background: #151b22; border-radius: 10px; overflow: hidden; }
+  th { background: #1a5276; color: #fff; text-align: left; padding: 9px 12px; }
+  td { border-top: 1px solid #32404e; padding: 8px 12px; }
+  .barra { background: #202a35; border-radius: 6px; height: 14px; min-width: 120px; overflow: hidden; }
+  .barra > div { height: 100%; background: #2ecc71; }
+  .barra.alerta > div { background: #e74c3c; }
+</style>
+</head>
+<body>
+<div class="panel">
+  <h1>{{ informe_web_titulo }} — {{ ansible_facts['hostname'] }}</h1>
+  <p class="meta">Generado con Ansible por {{ informe_web_autor }} · {{ informe_web_fecha.stdout }} · {{ informe_web_uptime.stdout }}</p>
+
+  <div class="tarjetas">
+    <div class="tarjeta"><div class="valor">{{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}</div><div class="etiqueta">Sistema operativo</div></div>
+    <div class="tarjeta"><div class="valor">{{ ansible_facts['processor_vcpus'] }}</div><div class="etiqueta">CPUs</div></div>
+    <div class="tarjeta"><div class="valor">{{ ansible_facts['memfree_mb'] }} / {{ ansible_facts['memtotal_mb'] }} MB</div><div class="etiqueta">Memoria libre / total</div></div>
+    <div class="tarjeta"><div class="valor">{{ informe_web_procesos.stdout }}</div><div class="etiqueta">Procesos en ejecución</div></div>
+  </div>
+
+  <table>
+    <tr><th>Disco</th><th>Usado</th><th>Ocupación</th></tr>
+{% for m in ansible_facts['mounts'] if m['size_total'] is defined and m['size_total'] > 0 %}
+{% set pct = (100 - m['size_available'] * 100 / m['size_total']) | round | int %}
+    <tr>
+      <td>{{ m['mount'] }}</td>
+      <td>{{ ((m['size_total'] - m['size_available']) / 1024 / 1024 / 1024) | round(1) }} / {{ (m['size_total'] / 1024 / 1024 / 1024) | round(1) }} GB</td>
+      <td><div class="barra{% if pct >= informe_web_umbral_disco_pct %} alerta{% endif %}"><div style="width: {{ pct }}%"></div></div> {{ pct }}%</td>
+    </tr>
+{% endfor %}
+  </table>
+</div>
+</body>
+</html>

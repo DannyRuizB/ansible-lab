@@ -1,0 +1,41 @@
+---
+# Tareas del rol informe_web: recopilar datos y generar el panel HTML.
+# Un rol agrupa tasks + templates + variables por defecto en una unidad
+# reutilizable: cualquier playbook puede invocarlo con "roles: [informe_web]".
+
+- name: Asegurar que existe la carpeta de destino
+  ansible.builtin.file:
+    path: "{{ informe_web_destino }}"
+    state: directory
+    mode: "0755"
+
+- name: Recoger la fecha y hora de generación
+  ansible.builtin.command: date "+%d/%m/%Y %H:%M"
+  register: informe_web_fecha
+  changed_when: false
+
+- name: Recoger el tiempo de encendido (uptime)
+  ansible.builtin.command: uptime -p
+  register: informe_web_uptime
+  changed_when: false
+
+- name: Contar procesos en ejecución
+  ansible.builtin.shell: set -o pipefail; ps -e --no-headers | wc -l
+  args:
+    executable: /bin/bash
+  register: informe_web_procesos
+  changed_when: false
+  # pipefail: si el primer comando de la tubería falla, la tarea falla
+  # (sin esto, el "wc -l" taparía el error de "ps")
+
+- name: Generar el panel HTML desde la plantilla
+  ansible.builtin.template:
+    src: panel.html.j2
+    dest: "{{ informe_web_destino }}/panel_{{ ansible_facts['hostname'] }}.html"
+    mode: "0644"
+  # En un rol, los templates se buscan automáticamente en la carpeta
+  # templates/ del propio rol: no hace falta ruta completa.
+
+- name: Indicar dónde ha quedado el panel
+  ansible.builtin.debug:
+    msg: "Panel generado en informes/panel_{{ ansible_facts['hostname'] }}.html — ábrelo en el navegador"

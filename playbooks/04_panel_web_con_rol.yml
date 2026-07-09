@@ -1,0 +1,22 @@
+---
+# =============================================================================
+# Playbook 4 — Panel web usando un ROL
+#
+# La misma idea que el playbook 2, pero organizada como ROL de Ansible
+# (roles/informe_web/): tareas + plantillas + variables por defecto
+# empaquetadas en una unidad reutilizable. Genera un panel HTML con el
+# estado de la máquina (CPU, memoria, discos con barras de ocupación).
+#
+# Ejecutar:
+#   ansible-playbook playbooks/04_panel_web_con_rol.yml
+#
+# Personalizar (las defaults del rol se pueden sobreescribir):
+#   ansible-playbook playbooks/04_panel_web_con_rol.yml -e "informe_web_titulo='Mi panel'"
+# =============================================================================
+
+- name: Generar panel web del sistema
+  hosts: laboratorio
+  gather_facts: true
+
+  roles:
+    - informe_web
