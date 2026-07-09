@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Descargar el código
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Instalar ansible-lint
         run: pipx install ansible-lint && pipx inject ansible-lint ansible-core
@@ -29,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Descargar el código
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Instalar ansible-core
         run: pipx install ansible-core
@@ -65,7 +65,7 @@ jobs:
         run: ansible-playbook playbooks/05_auditoria_salud.yml
 
       - name: Publicar los informes generados como artefacto
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: informes
           path: informes/
