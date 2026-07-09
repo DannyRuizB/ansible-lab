@@ -40,6 +40,7 @@
         - logs
         - releases
         - shared
+      tags: [estructura]
 
     - name: Generar el fichero de configuración desde plantilla
       ansible.builtin.template:
@@ -47,8 +48,10 @@
         dest: "{{ app_base }}/config/{{ app_nombre }}.conf"
         mode: "0644"
       notify: Reiniciar servicio simulado
+      tags: [config]
       # notify: si (y solo si) esta tarea cambia algo, al final del play
       # se ejecutará el handler. Si la config no cambió, no hay "reinicio".
+      # tags: permiten ejecutar solo una parte: --tags config, --skip-tags...
 
     - name: Asegurar la variable APP_ENV en el .env (lineinfile)
       ansible.builtin.lineinfile:
@@ -58,6 +61,7 @@
         create: true
         mode: "0644"
       notify: Reiniciar servicio simulado
+      tags: [config]
 
     - name: Añadir bloque de supervisión al .env (blockinfile con marcador)
       ansible.builtin.blockinfile:
@@ -67,6 +71,7 @@
           SUPERVISOR_ENABLED=true
           SUPERVISOR_QUEUE={{ app_nombre }}-colas
       notify: Reiniciar servicio simulado
+      tags: [config]
       # El marcador hace la tarea idempotente: por muchas veces que se
       # ejecute, el bloque solo existe una vez (igual que hace el equipo
       # de Sistemas en los playbooks de colas de Supervisor).
@@ -75,10 +80,12 @@
       ansible.builtin.command: cat {{ app_base }}/config/.env
       register: resultado_env      # guarda la salida en una variable
       changed_when: false          # leer un fichero nunca es un "cambio"
+      tags: [verificacion]
 
     - name: Mostrar la configuración resultante
       ansible.builtin.debug:
         msg: "{{ resultado_env.stdout_lines }}"
+      tags: [verificacion]
 
   handlers:
     - name: Reiniciar servicio simulado

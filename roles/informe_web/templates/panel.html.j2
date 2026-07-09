@@ -28,7 +28,7 @@
   <div class="tarjetas">
     <div class="tarjeta"><div class="valor">{{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}</div><div class="etiqueta">Sistema operativo</div></div>
     <div class="tarjeta"><div class="valor">{{ ansible_facts['processor_vcpus'] }}</div><div class="etiqueta">CPUs</div></div>
-    <div class="tarjeta"><div class="valor">{{ ansible_facts['memfree_mb'] }} / {{ ansible_facts['memtotal_mb'] }} MB</div><div class="etiqueta">Memoria libre / total</div></div>
+    <div class="tarjeta"><div class="valor">{{ ansible_facts['memory_mb']['nocache']['free'] }} / {{ ansible_facts['memtotal_mb'] }} MB</div><div class="etiqueta">Memoria disponible / total</div></div>
     <div class="tarjeta"><div class="valor">{{ informe_web_procesos.stdout }}</div><div class="etiqueta">Procesos en ejecución</div></div>
   </div>
 
