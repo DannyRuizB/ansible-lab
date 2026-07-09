@@ -64,8 +64,42 @@ jobs:
       - name: "Playbook 5 — auditoría de salud"
         run: ansible-playbook playbooks/05_auditoria_salud.yml
 
+      - name: "Playbook 6 — secretos con ansible-vault"
+        run: |
+          echo "laboratorio-demo" > .vault_pass
+          ansible-playbook playbooks/06_secretos_vault.yml --vault-password-file .vault_pass
+          rm .vault_pass
+
       - name: Publicar los informes generados como artefacto
         uses: actions/upload-artifact@v5
         with:
           name: informes
           path: informes/
+
+      - name: Preparar el panel para GitHub Pages
+        if: github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p _site
+          cp informes/panel_*.html _site/index.html
+
+      - name: Subir el panel como artefacto de Pages
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site/
+
+  publicar:
+    name: Publicar demo en GitHub Pages
+    if: github.ref == 'refs/heads/main'
+    needs: ejecutar
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Desplegar en Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

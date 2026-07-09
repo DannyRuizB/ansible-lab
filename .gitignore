@@ -4,3 +4,4 @@ entorno-prueba/
 
 # Ansible
 *.retry
+.vault_pass

@@ -8,6 +8,8 @@ Laboratorio de aprendizaje de **Ansible** que funciona **100% en local**: el ún
 
 Forma parte de mi formación en automatización/DevOps con perfil de administración de sistemas (ASIR).
 
+**🔴 Demo en vivo:** [dannyruizb.github.io/ansible-lab](https://dannyruizb.github.io/ansible-lab/) — el panel HTML que genera el playbook 4, ejecutado por el CI sobre el runner de GitHub y publicado automáticamente en cada push.
+
 ## 🎯 Qué demuestra
 
 | Playbook | Conceptos |
@@ -17,6 +19,7 @@ Forma parte de mi formación en automatización/DevOps con perfil de administrac
 | `playbooks/03_desplegar_app_simulada.yml` | Un "despliegue" en miniatura: **loop**, **template con variables**, **lineinfile**/**blockinfile** idempotentes con marcador, **register**/**changed_when** y **handlers con notify** (el "servicio" solo se "reinicia" si la configuración cambió) |
 | `playbooks/04_panel_web_con_rol.yml` | **Roles** — la estructura estándar de Ansible (`tasks/`, `templates/`, `defaults/`, `meta/`): el rol `informe_web` genera un panel HTML con tarjetas y barras de ocupación de disco |
 | `playbooks/05_auditoria_salud.yml` | Auditoría de **solo lectura** (como los `status.yml` de producción): **assert** con umbrales configurables, **when**, **stat**, `set_fact` y filtros Jinja (`selectattr`, `map`) |
+| `playbooks/06_secretos_vault.yml` | **ansible-vault** — `vars/secretos.yml` vive cifrado en el repo, se descifra en ejecución (`vars_files`) y se aplica con **no_log** para que los valores nunca salgan por pantalla ni logs |
 
 ## 📁 Estructura
 
@@ -31,7 +34,10 @@ ansible-lab/
 │   ├── 02_informe_sistema.yml
 │   ├── 03_desplegar_app_simulada.yml
 │   ├── 04_panel_web_con_rol.yml
-│   └── 05_auditoria_salud.yml
+│   ├── 05_auditoria_salud.yml
+│   └── 06_secretos_vault.yml
+├── vars/
+│   └── secretos.yml                     # secretos CIFRADOS con ansible-vault
 ├── roles/
 │   └── informe_web/                     # rol: panel HTML del sistema
 │       ├── tasks/main.yml
@@ -69,6 +75,12 @@ ansible-playbook playbooks/04_panel_web_con_rol.yml
 
 # 5. Auditoría de salud (solo lectura, nunca cambia nada)
 ansible-playbook playbooks/05_auditoria_salud.yml
+
+# 6. Secretos con ansible-vault (contraseña de la demo: laboratorio-demo)
+ansible-playbook playbooks/06_secretos_vault.yml --ask-vault-pass
+
+# Ver o editar el fichero cifrado
+ansible-vault view vars/secretos.yml --ask-vault-pass
 ```
 
 ### Cosas que probar
@@ -107,6 +119,9 @@ En cada push, GitHub Actions ([`ci.yml`](.github/workflows/ci.yml)):
 3. **Ejecuta los 5 playbooks de verdad** en el runner (al ser un laboratorio contra `localhost`, el CI es también el entorno de pruebas).
 4. Verifica la **idempotencia**: la segunda pasada del playbook 3 debe terminar con `changed=0` o el pipeline falla.
 5. Publica los informes generados como artefacto descargable.
+6. **Despliega el panel HTML en GitHub Pages** → [demo en vivo](https://dannyruizb.github.io/ansible-lab/).
+
+> La contraseña del vault (`laboratorio-demo`) está documentada porque los "secretos" son de mentira — el objetivo es demostrar la mecánica. En un entorno real la contraseña iría en un gestor de credenciales o en un secreto del CI, nunca en el README.
 
 ## 📝 Notas
 
