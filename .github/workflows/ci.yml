@@ -14,9 +14,15 @@ jobs:
   lint:
     name: Lint (ansible-lint)
     runs-on: ubuntu-latest
+    env:
+      # El linter necesita poder descifrar vars/secretos.yml
+      ANSIBLE_VAULT_PASSWORD_FILE: .vault_pass
     steps:
       - name: Descargar el código
         uses: actions/checkout@v5
+
+      - name: Crear el fichero de contraseña del vault (demo)
+        run: echo "laboratorio-demo" > .vault_pass
 
       - name: Instalar ansible-lint
         run: pipx install ansible-lint && pipx inject ansible-lint ansible-core
@@ -27,9 +33,14 @@ jobs:
   ejecutar:
     name: Ejecutar playbooks (localhost)
     runs-on: ubuntu-latest
+    env:
+      ANSIBLE_VAULT_PASSWORD_FILE: .vault_pass
     steps:
       - name: Descargar el código
         uses: actions/checkout@v5
+
+      - name: Crear el fichero de contraseña del vault (demo)
+        run: echo "laboratorio-demo" > .vault_pass
 
       - name: Instalar ansible-core
         run: pipx install ansible-core
@@ -65,10 +76,7 @@ jobs:
         run: ansible-playbook playbooks/05_auditoria_salud.yml
 
       - name: "Playbook 6 — secretos con ansible-vault"
-        run: |
-          echo "laboratorio-demo" > .vault_pass
-          ansible-playbook playbooks/06_secretos_vault.yml --vault-password-file .vault_pass
-          rm .vault_pass
+        run: ansible-playbook playbooks/06_secretos_vault.yml
 
       - name: Publicar los informes generados como artefacto
         uses: actions/upload-artifact@v5
