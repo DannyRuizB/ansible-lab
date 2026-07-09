@@ -1,0 +1,79 @@
+---
+# =============================================================================
+# Playbook 5 — Auditoría de salud (solo lectura)
+#
+# Un playbook de comprobación que NO cambia nada, como los "status.yml" que
+# se usan en entornos reales antes de tocar un servidor. Demuestra:
+#
+#   - tareas de solo lectura ..... changed_when: false (nunca marcan cambio)
+#   - register + when ............ actuar según el resultado de otra tarea
+#   - assert ..................... convertir comprobaciones en pasa/no-pasa
+#   - set_fact ................... construir un veredicto final
+#
+# Ejecutar:
+#   ansible-playbook playbooks/05_auditoria_salud.yml
+#
+# Endurecer los umbrales para verlo fallar:
+#   ansible-playbook playbooks/05_auditoria_salud.yml -e "umbral_disco_pct=1"
+# =============================================================================
+
+- name: Auditoría de salud del sistema
+  hosts: laboratorio
+  gather_facts: true
+
+  vars:
+    umbral_disco_pct: 90      # % de ocupación a partir del cual un disco suspende
+    umbral_memoria_mb: 256    # mínimo de memoria libre aceptable
+
+  tasks:
+    - name: Calcular ocupación de la raíz (/)
+      ansible.builtin.set_fact:
+        disco_raiz_pct: >-
+          {{ (ansible_facts['mounts']
+              | selectattr('mount', 'equalto', '/')
+              | map(attribute='size_available') | first) * 100
+             / (ansible_facts['mounts']
+              | selectattr('mount', 'equalto', '/')
+              | map(attribute='size_total') | first)
+             | round | int }}
+      # size_available es lo LIBRE: lo convertimos a % libre y de ahí a usado
+    - name: Convertir a porcentaje usado
+      ansible.builtin.set_fact:
+        disco_raiz_usado_pct: "{{ 100 - (disco_raiz_pct | int) }}"
+
+    - name: Comprobación 1 — espacio en disco de la raíz
+      ansible.builtin.assert:
+        that:
+          - disco_raiz_usado_pct | int < umbral_disco_pct | int
+        success_msg: "OK: la raíz está al {{ disco_raiz_usado_pct }}% (umbral: {{ umbral_disco_pct }}%)"
+        fail_msg: "ALERTA: la raíz está al {{ disco_raiz_usado_pct }}%, supera el umbral del {{ umbral_disco_pct }}%"
+
+    - name: Comprobación 2 — memoria libre mínima
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['memfree_mb'] > umbral_memoria_mb
+        success_msg: "OK: {{ ansible_facts['memfree_mb'] }} MB libres (mínimo: {{ umbral_memoria_mb }} MB)"
+        fail_msg: "ALERTA: solo quedan {{ ansible_facts['memfree_mb'] }} MB libres"
+
+    - name: Comprobar si existe la app simulada del playbook 3
+      ansible.builtin.stat:
+        path: "{{ ansible_facts['user_dir'] }}/ansible-lab/entorno-prueba/miapp/config/miapp.conf"
+      register: config_miapp
+
+    - name: Avisar si la app simulada no está desplegada (when)
+      ansible.builtin.debug:
+        msg: "La app simulada no está desplegada. Ejecuta antes el playbook 3."
+      when: not config_miapp.stat.exists
+
+    - name: Confirmar despliegue de la app simulada (when)
+      ansible.builtin.debug:
+        msg: "La app simulada está desplegada (config de {{ config_miapp.stat.size }} bytes)."
+      when: config_miapp.stat.exists
+
+    - name: Veredicto final
+      ansible.builtin.debug:
+        msg: >-
+          Auditoría completada en {{ ansible_facts['hostname'] }}:
+          disco {{ disco_raiz_usado_pct }}% usado,
+          {{ ansible_facts['memfree_mb'] }} MB de RAM libre,
+          app simulada {{ 'desplegada' if config_miapp.stat.exists else 'NO desplegada' }}.
