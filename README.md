@@ -14,6 +14,8 @@ Forma parte de mi formación en automatización/DevOps con perfil de administrac
 
 **🔴 Demo en vivo:** [dannyruizb.github.io/ansible-lab](https://dannyruizb.github.io/ansible-lab/) — el panel HTML que genera el playbook 4, ejecutado por el CI sobre el runner de GitHub y publicado automáticamente en cada push.
 
+[![Captura del panel generado por el rol informe_web](https://dannyruizb.github.io/ansible-lab/captura-panel.png)](https://dannyruizb.github.io/ansible-lab/)
+
 ## 🎯 Qué demuestra
 
 | Playbook | Conceptos |
@@ -101,6 +103,7 @@ El único playbook que sale de `localhost`: gestiona **3 "servidores" con SSH de
 
 ```bash
 ./flota.sh up          # clave SSH del lab + imagen + 3 contenedores
+./flota.sh esperar     # espera a que el sshd de los 3 nodos esté listo
 ansible -i inventario_flota.ini flota -m ping
 ansible-playbook -i inventario_flota.ini playbooks/07_flota_multihost.yml
 ./flota.sh down        # apagar y eliminar la flota (no queda nada corriendo)
@@ -151,13 +154,14 @@ En cada push, GitHub Actions ([`ci.yml`](.github/workflows/ci.yml)):
 2. Comprueba la **sintaxis** de todos los playbooks.
 3. **Ejecuta los playbooks de verdad** en el runner (al ser un laboratorio contra `localhost`, el CI es también el entorno de pruebas) y **levanta la flota Docker** para probar el multi-host por SSH.
 4. Verifica la **idempotencia**: la segunda pasada del playbook 3 debe terminar con `changed=0` o el pipeline falla.
-5. Publica los informes generados como artefacto descargable.
-6. **Despliega el panel HTML en GitHub Pages** → [demo en vivo](https://dannyruizb.github.io/ansible-lab/).
+5. Publica los informes generados como artefacto descargable, incluida una **captura PNG del panel** hecha con el Chrome headless del runner.
+6. **Despliega el panel HTML (y su captura) en GitHub Pages** → [demo en vivo](https://dannyruizb.github.io/ansible-lab/).
 
 > La contraseña del vault (`laboratorio-demo`) está documentada porque los "secretos" son de mentira — el objetivo es demostrar la mecánica. En un entorno real la contraseña iría en un gestor de credenciales o en un secreto del CI, nunca en el README.
 
 ## 📝 Notas
 
 - Sintaxis moderna de facts (`ansible_facts['distribution']` en lugar de `ansible_distribution`), compatible con ansible-core ≥ 2.21.
+- El intérprete de Python está fijado en `ansible.cfg` (`interpreter_python = /usr/bin/python3`): sin avisos de *interpreter discovery* y sin sorpresas si un nodo trae varios Python.
 - Los patrones del playbook 3 (marcadores `blockinfile`, handlers, variables sobreescribibles) son los mismos que se usan en entornos reales de producción, solo que aquí el "servicio" es simulado.
 - El playbook 5 se puede "endurecer" para verlo fallar: `ansible-playbook playbooks/05_auditoria_salud.yml -e "umbral_disco_pct=1"`.
