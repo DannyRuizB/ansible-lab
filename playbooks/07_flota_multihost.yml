@@ -74,3 +74,50 @@
         dest: "{{ app_base }}/logs/ultimo_reinicio.log"
         content: "Servicio {{ app_nombre }} 'reiniciado' en {{ ansible_facts['hostname'] }}.\n"
         mode: "0644"
+
+# =============================================================================
+# Segundo play — ROLLING UPDATE de los frontales web
+#
+# El play anterior ataca todos los nodos EN PARALELO. Este hace lo contrario,
+# y es el patrón de despliegue sin caída de servicio:
+#
+#   - serial: 1 ................. de uno en uno: mientras se actualiza web1,
+#                                 web2 sigue dando servicio
+#   - max_fail_percentage: 0 .... si un nodo falla, se ABORTA antes de tocar
+#                                 el siguiente (no propagas un despliegue roto)
+#
+# Es el mismo mecanismo que usan los equipos de sistemas para mantenimientos
+# en producción (p. ej. VACUUM de bases de datos por lotes).
+# =============================================================================
+
+- name: Actualizar los frontales web de uno en uno (rolling update)
+  hosts: web
+  gather_facts: false
+  serial: 1
+  max_fail_percentage: 0
+
+  vars:
+    # Las vars del play anterior no se heredan: cada play define las suyas
+    app_base: "/home/ansible/{{ app_nombre }}"
+    app_version: "1.0.0"
+
+  tasks:
+    - name: Publicar la nueva versión en el .env
+      ansible.builtin.lineinfile:
+        path: "{{ app_base }}/config/.env"
+        line: "APP_VERSION={{ app_version }}"
+        regexp: "^APP_VERSION="
+        create: true
+        mode: "0644"
+
+    - name: Comprobar la salud del nodo recién actualizado
+      ansible.builtin.stat:
+        path: "{{ app_base }}/config/{{ app_nombre }}.conf"
+      register: salud_nodo
+
+    - name: Confirmar que el nodo está sano antes de pasar al siguiente
+      ansible.builtin.assert:
+        that:
+          - salud_nodo.stat.exists
+        success_msg: "{{ inventory_hostname }} actualizado a v{{ app_version }} y sano; siguiente nodo"
+        fail_msg: "{{ inventory_hostname }} NO está sano: despliegue detenido aquí"

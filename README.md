@@ -3,6 +3,7 @@
 [![CI](https://github.com/DannyRuizB/ansible-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/DannyRuizB/ansible-lab/actions/workflows/ci.yml)
 ![Ansible](https://img.shields.io/badge/ansible--core-2.21-black?logo=ansible)
 ![Lint](https://img.shields.io/badge/ansible--lint-perfil%20production-brightgreen)
+![License](https://img.shields.io/badge/licencia-MIT-blue)
 
 Laboratorio de aprendizaje de **Ansible** que funciona **100% en local**, en dos niveles:
 
@@ -19,11 +20,11 @@ Forma parte de mi formación en automatización/DevOps con perfil de administrac
 |---|---|
 | `playbooks/01_ping.yml` | Inventario, módulo `ping`, **facts** y `debug` |
 | `playbooks/02_informe_sistema.yml` | **Templates Jinja2** — genera un informe Markdown del sistema (SO, hardware, discos) rellenando `templates/informe.md.j2` con los facts reales |
-| `playbooks/03_desplegar_app_simulada.yml` | Un "despliegue" en miniatura: **loop**, **template con variables**, **lineinfile**/**blockinfile** idempotentes con marcador, **register**/**changed_when** y **handlers con notify** (el "servicio" solo se "reinicia" si la configuración cambió) |
+| `playbooks/03_desplegar_app_simulada.yml` | Un "despliegue" en miniatura: **loop**, **template con variables**, **lineinfile**/**blockinfile** idempotentes con marcador, **register**/**changed_when**, **handlers con notify** y **tags** para ejecutar solo una parte |
 | `playbooks/04_panel_web_con_rol.yml` | **Roles** — la estructura estándar de Ansible (`tasks/`, `templates/`, `defaults/`, `meta/`): el rol `informe_web` genera un panel HTML con tarjetas y barras de ocupación de disco |
-| `playbooks/05_auditoria_salud.yml` | Auditoría de **solo lectura** (como los `status.yml` de producción): **assert** con umbrales configurables, **when**, **stat**, `set_fact` y filtros Jinja (`selectattr`, `map`) |
+| `playbooks/05_auditoria_salud.yml` | Auditoría de **solo lectura** (como los `status.yml` de producción): **assert** con umbrales configurables, **block/rescue/always** (el try/catch de Ansible), **when**, **stat**, `set_fact` y filtros Jinja |
 | `playbooks/06_secretos_vault.yml` | **ansible-vault** — `vars/secretos.yml` vive cifrado en el repo, se descifra en ejecución (`vars_files`) y se aplica con **no_log** para que los valores nunca salgan por pantalla ni logs |
-| `playbooks/07_flota_multihost.yml` | **Multi-host por SSH real** — 3 contenedores Docker locales como nodos gestionados: inventario con grupos `[web]`/`[db]`, **group_vars**, paralelismo y resumen con `run_once` + `hostvars` |
+| `playbooks/07_flota_multihost.yml` | **Multi-host por SSH real** — 3 contenedores Docker locales como nodos gestionados: inventario con grupos `[web]`/`[db]`, **group_vars**, paralelismo, resumen con `run_once` + `hostvars` y **rolling update** (`serial: 1` + `max_fail_percentage`) |
 
 ## 📁 Estructura
 
@@ -123,6 +124,14 @@ ansible-playbook playbooks/03_desplegar_app_simulada.yml -e "app_puerto=9090 app
 # Comandos ad-hoc contra el inventario
 ansible laboratorio -m ping
 ansible laboratorio -m setup -a "filter=*mem*"
+
+# Tags: ejecutar solo una parte del playbook 3
+ansible-playbook playbooks/03_desplegar_app_simulada.yml --list-tags
+ansible-playbook playbooks/03_desplegar_app_simulada.yml --tags config
+ansible-playbook playbooks/03_desplegar_app_simulada.yml --skip-tags verificacion
+
+# Ver a la auditoría suspender CON elegancia (block/rescue/always)
+ansible-playbook playbooks/05_auditoria_salud.yml -e "umbral_disco_pct=1"
 
 # Ver el handler en acción: edita a mano entorno-prueba/miapp/config/miapp.conf
 # y vuelve a ejecutar el playbook 3 → lo restaura y "reinicia" el servicio

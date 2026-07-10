@@ -8,12 +8,14 @@
 #   - tareas de solo lectura ..... changed_when: false (nunca marcan cambio)
 #   - register + when ............ actuar según el resultado de otra tarea
 #   - assert ..................... convertir comprobaciones en pasa/no-pasa
-#   - set_fact ................... construir un veredicto final
+#   - block / rescue / always .... el "try/catch" de Ansible: aunque una
+#                                  comprobación falle, el playbook termina
+#                                  con un veredicto en vez de morir a medias
 #
 # Ejecutar:
 #   ansible-playbook playbooks/05_auditoria_salud.yml
 #
-# Endurecer los umbrales para verlo fallar:
+# Endurecer los umbrales para verlo suspender (con elegancia):
 #   ansible-playbook playbooks/05_auditoria_salud.yml -e "umbral_disco_pct=1"
 # =============================================================================
 
@@ -23,7 +25,8 @@
 
   vars:
     umbral_disco_pct: 90      # % de ocupación a partir del cual un disco suspende
-    umbral_memoria_mb: 256    # mínimo de memoria libre aceptable
+    umbral_memoria_mb: 256    # mínimo de memoria DISPONIBLE aceptable
+    auditoria_ok: true        # el rescue lo pondrá a false si algo falla
 
   tasks:
     - name: Calcular ocupación de la raíz (/)
@@ -41,19 +44,40 @@
       ansible.builtin.set_fact:
         disco_raiz_usado_pct: "{{ 100 - (disco_raiz_pct | int) }}"
 
-    - name: Comprobación 1 — espacio en disco de la raíz
-      ansible.builtin.assert:
-        that:
-          - disco_raiz_usado_pct | int < umbral_disco_pct | int
-        success_msg: "OK: la raíz está al {{ disco_raiz_usado_pct }}% (umbral: {{ umbral_disco_pct }}%)"
-        fail_msg: "ALERTA: la raíz está al {{ disco_raiz_usado_pct }}%, supera el umbral del {{ umbral_disco_pct }}%"
+    - name: Comprobaciones con red de seguridad
+      block:
+        - name: Comprobación 1 — espacio en disco de la raíz
+          ansible.builtin.assert:
+            that:
+              - disco_raiz_usado_pct | int < umbral_disco_pct | int
+            success_msg: "OK: la raíz está al {{ disco_raiz_usado_pct }}% (umbral: {{ umbral_disco_pct }}%)"
+            fail_msg: "ALERTA: la raíz está al {{ disco_raiz_usado_pct }}%, supera el umbral del {{ umbral_disco_pct }}%"
 
-    - name: Comprobación 2 — memoria libre mínima
-      ansible.builtin.assert:
-        that:
-          - ansible_facts['memfree_mb'] > umbral_memoria_mb
-        success_msg: "OK: {{ ansible_facts['memfree_mb'] }} MB libres (mínimo: {{ umbral_memoria_mb }} MB)"
-        fail_msg: "ALERTA: solo quedan {{ ansible_facts['memfree_mb'] }} MB libres"
+        - name: Comprobación 2 — memoria disponible mínima
+          ansible.builtin.assert:
+            that:
+              - ansible_facts['memory_mb']['nocache']['free'] | int > umbral_memoria_mb | int
+            success_msg: "OK: {{ ansible_facts['memory_mb']['nocache']['free'] }} MB disponibles (mínimo: {{ umbral_memoria_mb }} MB)"
+            fail_msg: "ALERTA: solo quedan {{ ansible_facts['memory_mb']['nocache']['free'] }} MB disponibles"
+          # nocache.free = memoria realmente DISPONIBLE (la columna "available"
+          # de free -m). El fact memfree_mb es solo el MemFree del kernel, que
+          # en Linux siempre es bajísimo por la caché de página: usarlo haría
+          # suspender (o aprobar) la auditoría en falso.
+
+      rescue:
+        # El "catch": se ejecuta SOLO si algo del block falló
+        - name: Registrar el suspenso
+          ansible.builtin.set_fact:
+            auditoria_ok: false
+        - name: Explicar qué comprobación falló
+          ansible.builtin.debug:
+            msg: "Falló: {{ ansible_failed_task.name }}"
+
+      always:
+        # El "finally": se ejecuta siempre, pase lo que pase
+        - name: Estado de las comprobaciones
+          ansible.builtin.debug:
+            msg: "Comprobaciones de umbrales: {{ 'APTO' if auditoria_ok else 'SUSPENSO' }}"
 
     - name: Comprobar si existe la app simulada del playbook 3
       ansible.builtin.stat:
@@ -75,5 +99,13 @@
         msg: >-
           Auditoría completada en {{ ansible_facts['hostname'] }}:
           disco {{ disco_raiz_usado_pct }}% usado,
-          {{ ansible_facts['memfree_mb'] }} MB de RAM libre,
+          {{ ansible_facts['memory_mb']['nocache']['free'] }} MB disponibles,
           app simulada {{ 'desplegada' if config_miapp.stat.exists else 'NO desplegada' }}.
+          Resultado: {{ 'APTO' if auditoria_ok else 'SUSPENSO' }}.
+
+    - name: Terminar con error si la auditoría suspende
+      ansible.builtin.fail:
+        msg: "La auditoría ha SUSPENDIDO: revisa las alertas de arriba."
+      when: not auditoria_ok
+      # Así el playbook devuelve exit != 0 (útil para CI o scripts) pero
+      # habiendo dado antes el informe completo, gracias al block/rescue.
