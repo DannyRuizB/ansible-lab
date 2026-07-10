@@ -78,7 +78,7 @@ jobs:
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \
-            --window-size=1280,1500 \
+            --window-size=1280,650 \
             --screenshot=informes/captura-panel.png \
             "file://$PWD/$(ls informes/panel_*.html)"
 
