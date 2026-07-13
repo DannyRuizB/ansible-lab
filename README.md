@@ -27,6 +27,7 @@ Forma parte de mi formación en automatización/DevOps con perfil de administrac
 | `playbooks/05_auditoria_salud.yml` | Auditoría de **solo lectura** (como los `status.yml` de producción): **assert** con umbrales configurables, **block/rescue/always** (el try/catch de Ansible), **when**, **stat**, `set_fact` y filtros Jinja |
 | `playbooks/06_secretos_vault.yml` | **ansible-vault** — `vars/secretos.yml` vive cifrado en el repo, se descifra en ejecución (`vars_files`) y se aplica con **no_log** para que los valores nunca salgan por pantalla ni logs |
 | `playbooks/07_flota_multihost.yml` | **Multi-host por SSH real** — 3 contenedores Docker locales como nodos gestionados: inventario con grupos `[web]`/`[db]`, **group_vars**, paralelismo, resumen con `run_once` + `hostvars` y **rolling update** (`serial: 1` + `max_fail_percentage`) |
+| `playbooks/08_colecciones_galaxy.yml` | **Colecciones de Galaxy** — `requirements.yml` con versión + `ansible-galaxy collection install`, **FQCN**, el módulo `community.general.ini_file`, y `lookup('password')` que genera una credencial una sola vez (con `no_log` y modo 0600) y la verifica releyendo el INI |
 
 ## 📁 Estructura
 
@@ -36,6 +37,7 @@ ansible-lab/
 ├── inventario.ini                       # inventario: localhost con conexión local
 ├── .ansible-lint                        # configuración del linter (perfil, excepciones)
 ├── .github/workflows/ci.yml             # CI: lint + ejecución real de los playbooks
+├── requirements.yml                     # colecciones de Galaxy que usa el lab
 ├── inventario_flota.ini                 # inventario multi-host (grupos web/db)
 ├── flota.sh                             # levantar/apagar los 3 nodos Docker
 ├── multihost/Dockerfile                 # imagen de nodo: Debian + sshd + python3
@@ -49,7 +51,8 @@ ansible-lab/
 │   ├── 04_panel_web_con_rol.yml
 │   ├── 05_auditoria_salud.yml
 │   ├── 06_secretos_vault.yml
-│   └── 07_flota_multihost.yml
+│   ├── 07_flota_multihost.yml
+│   └── 08_colecciones_galaxy.yml
 ├── vars/
 │   └── secretos.yml                     # secretos CIFRADOS con ansible-vault
 ├── roles/
@@ -95,6 +98,10 @@ ansible-playbook playbooks/06_secretos_vault.yml --ask-vault-pass
 
 # Ver o editar el fichero cifrado
 ansible-vault view vars/secretos.yml --ask-vault-pass
+
+# 8. Colecciones de Galaxy (instalar las colecciones primero)
+ansible-galaxy collection install -r requirements.yml
+ansible-playbook playbooks/08_colecciones_galaxy.yml
 ```
 
 ## 🚢 Flota multi-host (playbook 7)

@@ -25,7 +25,10 @@ jobs:
         run: echo "laboratorio-demo" > .vault_pass
 
       - name: Instalar ansible-lint
-        run: pipx install ansible-lint && pipx inject ansible-lint ansible-core
+        run: pipx install ansible-lint && pipx inject --include-apps ansible-lint ansible-core
+
+      - name: Instalar las colecciones de Galaxy (requirements.yml)
+        run: ansible-galaxy collection install -r requirements.yml
 
       - name: Ejecutar ansible-lint
         run: ansible-lint
@@ -44,6 +47,9 @@ jobs:
 
       - name: Instalar ansible-core
         run: pipx install ansible-core
+
+      - name: Instalar las colecciones de Galaxy (requirements.yml)
+        run: ansible-galaxy collection install -r requirements.yml
 
       - name: Comprobar sintaxis de todos los playbooks
         run: |
@@ -74,6 +80,15 @@ jobs:
 
       - name: "Playbook 6 — secretos con ansible-vault"
         run: ansible-playbook playbooks/06_secretos_vault.yml
+
+      - name: "Playbook 8 — colecciones de Galaxy (1ª pasada)"
+        run: ansible-playbook playbooks/08_colecciones_galaxy.yml
+
+      - name: "Playbook 8 — 2ª pasada: comprobar idempotencia (changed=0)"
+        run: |
+          salida=$(ansible-playbook playbooks/08_colecciones_galaxy.yml)
+          echo "$salida" | tail -3
+          echo "$salida" | grep -q "changed=0" || { echo "::error::El playbook no es idempotente"; exit 1; }
 
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
