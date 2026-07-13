@@ -1,0 +1,95 @@
+---
+# =============================================================================
+# Playbook 8 — Colecciones de Ansible Galaxy
+#
+# ansible-core solo trae los módulos ansible.builtin.*. El resto del
+# ecosistema (miles de módulos, filtros y lookups) vive en COLECCIONES
+# publicadas en galaxy.ansible.com. Este playbook usa community.general,
+# declarada en requirements.yml (raíz del repo), como haría un proyecto real:
+#
+#   ansible-galaxy collection install -r requirements.yml
+#
+#   - requirements.yml ......... declarar colecciones con versión (reproducible)
+#   - FQCN ..................... nombre completo (community.general.ini_file):
+#                                así siempre se sabe de qué colección sale un módulo
+#   - community.general.ini_file  escribir/editar ficheros INI clave a clave
+#   - lookup('password') ....... genera una credencial UNA sola vez y la guarda
+#                                en un fichero; las siguientes ejecuciones la
+#                                reutilizan (por eso es idempotente)
+#   - lookup('ansible.builtin.ini')  releer un INI para verificar la config
+#
+# Todo ocurre dentro de entorno-prueba/ en el repositorio (borrable sin riesgo).
+#
+# Ejecutar:
+#   ansible-galaxy collection install -r requirements.yml
+#   ansible-playbook playbooks/08_colecciones_galaxy.yml
+# =============================================================================
+
+- name: Configurar la app simulada con módulos de colecciones Galaxy
+  hosts: laboratorio
+  gather_facts: false
+
+  vars:
+    # playbook_dir/../ = la raíz del repositorio, esté clonado donde esté
+    app_base: "{{ playbook_dir }}/../entorno-prueba/app-galaxy"
+    config_ini: "{{ app_base }}/config.ini"
+    # El lookup de abajo genera la credencial la PRIMERA vez y la deja aquí;
+    # después la relee de este fichero (0600) en vez de generar otra.
+    credencial_fichero: "{{ app_base }}/.api_key"
+
+  tasks:
+    - name: Crear el directorio de la app
+      ansible.builtin.file:
+        path: "{{ app_base }}"
+        state: directory
+        mode: "0755"
+
+    # lookup('password') es de ansible-core, pero es la pareja natural de este
+    # ejercicio: credencial autogenerada que el playbook nunca lleva escrita.
+    # no_log evita que el valor aparezca en la salida o en los logs del CI.
+    - name: Generar (u obtener) la credencial de la API
+      ansible.builtin.set_fact:
+        api_key: "{{ lookup('ansible.builtin.password', credencial_fichero + ' length=24 chars=ascii_letters,digits') }}"
+      no_log: true
+
+    - name: Asegurar permisos restrictivos del fichero de credencial
+      ansible.builtin.file:
+        path: "{{ credencial_fichero }}"
+        mode: "0600"
+
+    # ini_file NO existe en ansible-core: viene de community.general. Edita el
+    # INI clave a clave (crea el fichero si no existe) y es idempotente: si el
+    # valor ya está, no cambia nada.
+    - name: Escribir la configuración de la app (config.ini)
+      community.general.ini_file:
+        path: "{{ config_ini }}"
+        section: "{{ item.seccion }}"
+        option: "{{ item.clave }}"
+        value: "{{ item.valor }}"
+        mode: "0600"
+      loop:
+        - { seccion: app, clave: nombre, valor: laboratorio-galaxy }
+        - { seccion: app, clave: entorno, valor: demo }
+        - { seccion: api, clave: url, valor: "https://api.ejemplo.local/v1" }
+        - { seccion: api, clave: clave, valor: "{{ api_key }}" }
+      loop_control:
+        # El valor de la clave api es secreto: en pantalla solo sale la etiqueta.
+        label: "[{{ item.seccion }}] {{ item.clave }}"
+
+    # Ida y vuelta: releer el INI recién escrito (lookup ini, de ansible-core)
+    # y comprobar que la configuración quedó exactamente como se declaró.
+    - name: Verificar la configuración releyendo el INI
+      ansible.builtin.assert:
+        that:
+          - lookup('ansible.builtin.ini', 'nombre', section='app', file=config_ini) == 'laboratorio-galaxy'
+          - lookup('ansible.builtin.ini', 'url', section='api', file=config_ini) == 'https://api.ejemplo.local/v1'
+          - lookup('ansible.builtin.ini', 'clave', section='api', file=config_ini) == api_key
+        quiet: true
+      no_log: true
+
+    - name: Resumen
+      ansible.builtin.debug:
+        msg: >-
+          config.ini escrito y verificado en {{ config_ini | realpath }};
+          credencial de {{ api_key | length }} caracteres guardada en
+          {{ credencial_fichero | basename }} (0600, se reutiliza en cada pasada)

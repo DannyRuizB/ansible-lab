@@ -1,0 +1,17 @@
+---
+# =============================================================================
+# Colecciones de Ansible Galaxy que necesita el laboratorio (playbook 8).
+#
+# ansible-core trae solo los módulos básicos (ansible.builtin.*); todo lo
+# demás vive en COLECCIONES publicadas en galaxy.ansible.com. Un proyecto
+# real declara aquí las que usa (con su versión) y las instala con:
+#
+#   ansible-galaxy collection install -r requirements.yml
+#
+# Ver las instaladas:  ansible-galaxy collection list
+# =============================================================================
+collections:
+  # Paraguas de módulos de propósito general (ini_file, ufw, timezone...).
+  # Se fija un mínimo de versión mayor para reproducibilidad razonable.
+  - name: community.general
+    version: ">=8.0.0"
