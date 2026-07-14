@@ -1,0 +1,116 @@
+---
+# =============================================================================
+# Playbook 9 — Modo check y diff: el ensayo general
+#
+# `--check` ejecuta el playbook SIN aplicar nada: cada tarea informa de lo
+# que HABRÍA cambiado. `--diff` añade el parche exacto (líneas + / -).
+# Juntos son el ensayo general que se hace antes de tocar un servidor de
+# verdad... y tienen letra pequeña, que es lo que enseña este playbook:
+#
+#   - ansible_check_mode .. variable mágica: true cuando esto es un ensayo
+#   - check_mode: false ... tarea que se ejecuta HASTA en el ensayo (lecturas
+#                           que otras tareas necesitan; command/shell se
+#                           saltan en --check si no se les fuerza)
+#   - check_mode: true .... tarea que SIEMPRE es ensayo (nunca aplica, ni en
+#                           la ejecución real)
+#   - la trampa ........... una lectura forzada que depende de algo que una
+#                           tarea anterior "creó"... pero en el ensayo nadie
+#                           creó nada. Sin compensarla, el --check muere en
+#                           un playbook perfectamente correcto.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/09_ensayo_check_diff.yml --check --diff   # ensayo
+#   ansible-playbook playbooks/09_ensayo_check_diff.yml                  # de verdad
+#
+# Para ver el --diff en acción, ensaya un cambio de versión:
+#   ansible-playbook playbooks/09_ensayo_check_diff.yml --check --diff -e "app_version=3.0.0"
+# =============================================================================
+
+- name: Ensayo general — modo check y diff
+  hosts: laboratorio
+  gather_facts: false
+
+  vars:
+    ensayo_base: "{{ playbook_dir }}/../entorno-prueba/ensayo"
+    app_version: "2.0.0"
+
+  tasks:
+    - name: Anunciar si esto es un ensayo o va en serio
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'ENSAYO (--check): ninguna tarea tocará el disco'
+             if ansible_check_mode
+             else 'Ejecución REAL: los cambios se aplican' }}
+
+    # Una lectura que el resto del playbook necesita. Los módulos command /
+    # shell no saben simularse, así que en --check Ansible los SALTA... y
+    # `config_actual` quedaría sin definir. check_mode: false la fuerza a
+    # ejecutarse también en el ensayo — es seguro porque solo lee.
+    - name: Leer qué versión hay desplegada ahora mismo (se ejecuta hasta en el ensayo)
+      ansible.builtin.command: cat {{ ensayo_base }}/app.conf
+      register: config_actual
+      changed_when: false
+      failed_when: false # la primera vez el fichero no existe: rc != 0 y no pasa nada
+      check_mode: false
+
+    - name: Decidir si es despliegue nuevo o actualización
+      ansible.builtin.set_fact:
+        despliegue_nuevo: "{{ config_actual.rc != 0 }}"
+        version_desplegada: >-
+          {{ (config_actual.stdout_lines
+              | select('match', '^version=') | first | default('ninguna'))
+             if config_actual.rc == 0 else 'ninguna' }}
+
+    - name: Crear el directorio del despliegue
+      ansible.builtin.file:
+        path: "{{ ensayo_base }}"
+        state: directory
+        mode: "0755"
+
+    # La tarea estrella del --diff: en el ensayo enseña el parche exacto
+    # (qué líneas cambian) ANTES de aplicar nada. Pruébalo con
+    #   --check --diff -e "app_version=3.0.0"
+    - name: Escribir la configuración de la app (esta es la del --diff)
+      ansible.builtin.copy:
+        dest: "{{ ensayo_base }}/app.conf"
+        content: |
+          # Gestionado por Ansible — playbook 9
+          version={{ app_version }}
+          entorno=laboratorio
+        mode: "0644"
+
+    # ── LA TRAMPA DEL MODO CHECK ────────────────────────────────────────
+    # Verificación post-escritura: necesita ejecutarse en el ensayo (por eso
+    # check_mode: false), pero lee el fichero que la tarea anterior
+    # "escribió"... y en el PRIMER ensayo sobre una máquina limpia esa
+    # escritura fue simulada → grep muere contra un fichero inexistente y
+    # el --check falla en un playbook perfectamente correcto. Este patrón
+    # exacto rompía el --check de un repo real de hardening. La solución:
+    # perdonar el fallo SOLO cuando es un ensayo.
+    - name: Verificar la configuración escrita (compensada para el ensayo)
+      ansible.builtin.command: grep -c '^version=' {{ ensayo_base }}/app.conf
+      register: verificacion
+      changed_when: false
+      check_mode: false
+      failed_when: verificacion.rc != 0 and not ansible_check_mode
+
+    # Lo contrario de check_mode: false — una tarea que NUNCA aplica, ni
+    # siquiera en la ejecución real. Útil para dejar a la vista en cada
+    # pasada lo que haría una acción destructiva sin ejecutarla jamás desde
+    # este playbook. Por eso este playbook siempre termina con changed=1:
+    # el "cambio" es este borrado ensayado, que nunca llega al disco.
+    - name: Ensayar SIEMPRE la limpieza del despliegue (nunca borra de verdad)
+      ansible.builtin.file:
+        path: "{{ ensayo_base }}"
+        state: absent
+      check_mode: true
+      register: limpieza
+
+    - name: Resumen del ensayo/ejecución
+      ansible.builtin.debug:
+        msg:
+          - "Modo ................. {{ 'ensayo (--check)' if ansible_check_mode else 'real' }}"
+          - "Despliegue nuevo ..... {{ despliegue_nuevo }}"
+          - "Versión ya desplegada  {{ version_desplegada }}"
+          - "Versión objetivo ..... {{ app_version }}"
+          - "La limpieza habría borrado el directorio: {{ limpieza.changed }}"

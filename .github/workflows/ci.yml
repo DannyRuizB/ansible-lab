@@ -90,6 +90,29 @@ jobs:
           echo "$salida" | tail -3
           echo "$salida" | grep -q "changed=0" || { echo "::error::El playbook no es idempotente"; exit 1; }
 
+      - name: "Playbook 9 — ensayo (--check --diff) sobre entorno limpio"
+        run: ansible-playbook playbooks/09_ensayo_check_diff.yml --check --diff
+
+      - name: "Playbook 9 — un ensayo no toca el disco"
+        run: |
+          if [ -e entorno-prueba/ensayo ]; then
+            echo "::error::El --check ha creado entorno-prueba/ensayo — un ensayo no debe tocar nada"
+            exit 1
+          fi
+
+      - name: "Playbook 9 — ejecución real"
+        run: ansible-playbook playbooks/09_ensayo_check_diff.yml
+
+      - name: "Playbook 9 — 2ª pasada: changed=1 exacto (solo la limpieza ensayada)"
+        run: |
+          salida=$(ansible-playbook playbooks/09_ensayo_check_diff.yml)
+          echo "$salida" | tail -3
+          # El único "cambio" legítimo es el borrado con check_mode: true, que
+          # se ensaya en cada pasada pero nunca llega al disco. Más de uno =
+          # el playbook no es idempotente; cero = la lección desapareció.
+          echo "$salida" | grep -q "changed=1 " || { echo "::error::Se esperaba changed=1 (la limpieza ensayada)"; exit 1; }
+          test -d entorno-prueba/ensayo || { echo "::error::La limpieza ensayada ha borrado de verdad"; exit 1; }
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \

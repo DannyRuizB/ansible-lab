@@ -7,7 +7,7 @@
 
 Laboratorio de aprendizaje de **Ansible** que funciona **100% en local**, en dos niveles:
 
-- **Playbooks 1-6**: el "servidor" gestionado es la propia máquina (`localhost` con `ansible_connection=local`). Sin SSH, sin servidores remotos, sin permisos de administrador — todo ocurre dentro del directorio del proyecto.
+- **Playbooks 1-6, 8 y 9**: el "servidor" gestionado es la propia máquina (`localhost` con `ansible_connection=local`). Sin SSH, sin servidores remotos, sin permisos de administrador — todo ocurre dentro del directorio del proyecto.
 - **Playbook 7 (opcional)**: una "flota" de 3 contenedores Docker locales gestionados **por SSH real**, para practicar inventarios multi-host. Requiere Docker, pero sigue siendo local: los contenedores solo escuchan en `127.0.0.1`.
 
 Forma parte de mi formación en automatización/DevOps con perfil de administración de sistemas (ASIR).
@@ -28,6 +28,7 @@ Forma parte de mi formación en automatización/DevOps con perfil de administrac
 | `playbooks/06_secretos_vault.yml` | **ansible-vault** — `vars/secretos.yml` vive cifrado en el repo, se descifra en ejecución (`vars_files`) y se aplica con **no_log** para que los valores nunca salgan por pantalla ni logs |
 | `playbooks/07_flota_multihost.yml` | **Multi-host por SSH real** — 3 contenedores Docker locales como nodos gestionados: inventario con grupos `[web]`/`[db]`, **group_vars**, paralelismo, resumen con `run_once` + `hostvars` y **rolling update** (`serial: 1` + `max_fail_percentage`) |
 | `playbooks/08_colecciones_galaxy.yml` | **Colecciones de Galaxy** — `requirements.yml` con versión + `ansible-galaxy collection install`, **FQCN**, el módulo `community.general.ini_file`, y `lookup('password')` que genera una credencial una sola vez (con `no_log` y modo 0600) y la verifica releyendo el INI |
+| `playbooks/09_ensayo_check_diff.yml` | **Modo check y diff** — el "ensayo general" (`--check --diff`) y su letra pequeña: `ansible_check_mode`, `check_mode: false` (lecturas que deben ejecutarse hasta en el ensayo), `check_mode: true` (acciones que NUNCA se aplican) y **la trampa clásica**: una verificación forzada que depende de algo que el ensayo no creó — el mismo patrón que rompía el `--check` de un repo real de hardening |
 
 ## 📁 Estructura
 
@@ -52,7 +53,8 @@ ansible-lab/
 │   ├── 05_auditoria_salud.yml
 │   ├── 06_secretos_vault.yml
 │   ├── 07_flota_multihost.yml
-│   └── 08_colecciones_galaxy.yml
+│   ├── 08_colecciones_galaxy.yml
+│   └── 09_ensayo_check_diff.yml
 ├── vars/
 │   └── secretos.yml                     # secretos CIFRADOS con ansible-vault
 ├── roles/
@@ -160,7 +162,7 @@ En cada push, GitHub Actions ([`ci.yml`](.github/workflows/ci.yml)):
 1. Pasa **ansible-lint** (el proyecto cumple el perfil `production`).
 2. Comprueba la **sintaxis** de todos los playbooks.
 3. **Ejecuta los playbooks de verdad** en el runner (al ser un laboratorio contra `localhost`, el CI es también el entorno de pruebas) y **levanta la flota Docker** para probar el multi-host por SSH.
-4. Verifica la **idempotencia**: la segunda pasada del playbook 3 debe terminar con `changed=0` o el pipeline falla.
+4. Verifica la **idempotencia**: la segunda pasada del playbook 3 debe terminar con `changed=0` o el pipeline falla. Y verifica el **contrato del modo check** con el playbook 9: el ensayo `--check` sobre un entorno limpio no puede morir ni tocar el disco, y tras la ejecución real la única "novedad" permitida es su limpieza ensayada (que nunca borra nada).
 5. Publica los informes generados como artefacto descargable, incluida una **captura PNG del panel** hecha con el Chrome headless del runner.
 6. **Despliega el panel HTML (y su captura) en GitHub Pages** → [demo en vivo](https://dannyruizb.github.io/ansible-lab/).
 
