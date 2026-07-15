@@ -122,6 +122,15 @@ jobs:
           echo "$salida" | tail -3
           echo "$salida" | grep -q "changed=0" || { echo "::error::El playbook no es idempotente"; exit 1; }
 
+      - name: "Playbook 11 — esperas y reintentos (1ª pasada)"
+        run: ansible-playbook playbooks/11_esperas_y_reintentos.yml
+
+      - name: "Playbook 11 — 2ª pasada: comprobar idempotencia (changed=0)"
+        run: |
+          salida=$(ansible-playbook playbooks/11_esperas_y_reintentos.yml)
+          echo "$salida" | tail -3
+          echo "$salida" | grep -q "changed=0" || { echo "::error::El playbook no es idempotente"; exit 1; }
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \

@@ -1,0 +1,127 @@
+---
+# =============================================================================
+# Playbook 11 — Esperas y reintentos: cuando el servidor no va a tu ritmo
+#
+# La mitad del trabajo real de automatización es ESPERAR: a que la base de
+# datos levante, a que un despliegue termine, a que un puerto responda.
+# Ansible tiene cuatro herramientas para eso y este playbook las enseña
+# juntas, en el orden en que se usan en producción:
+#
+#   - async + poll: 0 ...... "dispara y sigue": la tarea corre en segundo
+#                            plano en el nodo gestionado y el playbook NO
+#                            se queda bloqueado mirándola
+#   - async_status ......... consultar cómo va ese trabajo en background
+#   - retries + until ...... reintentar una comprobación hasta que se cumpla
+#                            (el bucle de espera de toda la vida, sin bash)
+#   - wait_for ............. esperar a que exista un fichero / abra un
+#                            puerto / aparezca una cadena, con timeout
+#
+# La "tarea lenta" del laboratorio es un script que tarda unos segundos en
+# dejar su resultado en disco — el papel que en producción haría una
+# migración de BD, un restore o un apt upgrade largo.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/11_esperas_y_reintentos.yml
+# =============================================================================
+
+- name: Esperas y reintentos — async, async_status, until y wait_for
+  hosts: laboratorio
+  gather_facts: false
+
+  vars:
+    esperas_base: "{{ playbook_dir }}/../entorno-prueba/esperas"
+    resultado: "{{ esperas_base }}/resultado.txt"
+
+  tasks:
+    - name: Crear el directorio de trabajo
+      ansible.builtin.file:
+        path: "{{ esperas_base }}"
+        state: directory
+        mode: "0755"
+
+    # ── async + poll: 0 — dispara y sigue ──────────────────────────────
+    # Sin async, Ansible se quedaría 4 segundos parado en esta tarea.
+    # Con poll: 0 la lanza y pasa a la siguiente al instante; `async: 60`
+    # es el margen máximo que le damos antes de que Ansible la mate.
+    # Idempotencia con guard EXPLÍCITO (stat + when) en vez de `creates:`:
+    # en una tarea async el changed_when fijo pisa el "skipped, since ...
+    # exists" de creates y la segunda pasada saldría changed — cazado
+    # ejecutándolo dos veces, como manda el CI de este laboratorio.
+    - name: Comprobar si el resultado ya existe (guard de idempotencia)
+      ansible.builtin.stat:
+        path: "{{ resultado }}"
+      register: resultado_previo
+
+    - name: Lanzar la "tarea lenta" en segundo plano (async, dispara y sigue)
+      ansible.builtin.shell: |
+        sleep 4
+        echo "terminado a las $(date +%H:%M:%S)" > "{{ resultado }}"
+      async: 60
+      poll: 0
+      changed_when: true
+      register: trabajo_lento
+      when: not resultado_previo.stat.exists
+
+    - name: Mientras tanto, el playbook sigue haciendo otras cosas
+      ansible.builtin.debug:
+        msg: >-
+          La tarea lenta corre en background
+          ({{ 'job ' + trabajo_lento.ansible_job_id
+              if trabajo_lento.ansible_job_id is defined
+              else 'ya estaba hecha de una ejecución anterior' }}) —
+          este debug se imprime sin esperarla.
+
+    # ── async_status + retries/until — el bucle de espera ──────────────
+    # Se consulta el job hasta que declare `finished`. retries × delay es
+    # el timeout real (10 × 1 s): si el trabajo tardara más, la tarea
+    # falla y el playbook para — mejor un fallo claro que colgarse.
+    # Solo tiene sentido si esta ejecución lanzó el job (de ahí el when).
+    - name: Esperar a que el trabajo termine (async_status con reintentos)
+      ansible.builtin.async_status:
+        jid: "{{ trabajo_lento.ansible_job_id }}"
+      register: estado_trabajo
+      until: estado_trabajo.finished
+      retries: 10
+      delay: 1
+      when: trabajo_lento.ansible_job_id is defined
+
+    # ── wait_for — esperar a un artefacto concreto ──────────────────────
+    # Espera a que el fichero exista Y contenga la palabra "terminado"
+    # (search_regex). En producción el mismo módulo espera a que un puerto
+    # abra (port:) o a que un lock desaparezca (state: absent).
+    - name: Esperar al fichero de resultado (wait_for con search_regex)
+      ansible.builtin.wait_for:
+        path: "{{ resultado }}"
+        search_regex: terminado
+        timeout: 15
+
+    # ── retries/until sobre una comprobación propia ─────────────────────
+    # El mismo patrón de reintento vale para CUALQUIER comando: aquí una
+    # lectura (changed_when: false) que reintenta hasta que rc == 0.
+    - name: Releer el resultado con reintentos (until sobre un command)
+      ansible.builtin.command: grep -c terminado {{ resultado }}
+      register: comprobacion
+      until: comprobacion.rc == 0
+      retries: 5
+      delay: 1
+      changed_when: false
+
+    # ── delegate_to — ejecutar la comprobación en OTRA máquina ──────────
+    # En producción: verificar desde el balanceador que el backend responde,
+    # o desde el nodo de control que el DNS ya propagó. En este laboratorio
+    # el nodo de control y el gestionado son la misma máquina, pero la
+    # mecánica es idéntica: la tarea corre donde dice delegate_to, no en
+    # el host del play.
+    - name: Verificar el resultado desde el nodo de control (delegate_to)
+      ansible.builtin.stat:
+        path: "{{ resultado }}"
+      delegate_to: localhost
+      register: vista_control
+
+    - name: Resumen de la lección
+      ansible.builtin.debug:
+        msg:
+          - "Job async .............. {{ trabajo_lento.ansible_job_id | default('no lanzado (ya existía)') }}"
+          - "Terminó en background .. {{ estado_trabajo.finished | default('(no se esperó: nada que esperar)') }}"
+          - "Contenido verificado ... {{ comprobacion.stdout }} línea(s) con 'terminado'"
+          - "Visto desde control .... {{ vista_control.stat.exists }}"
