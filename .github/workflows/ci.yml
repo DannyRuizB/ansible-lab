@@ -131,6 +131,15 @@ jobs:
           echo "$salida" | tail -3
           echo "$salida" | grep -q "changed=0" || { echo "::error::El playbook no es idempotente"; exit 1; }
 
+      - name: "Playbook 12 — import vs include (1ª pasada)"
+        run: ansible-playbook playbooks/12_import_vs_include.yml
+
+      - name: "Playbook 12 — 2ª pasada: comprobar idempotencia (changed=0)"
+        run: |
+          salida=$(ansible-playbook playbooks/12_import_vs_include.yml)
+          echo "$salida" | tail -3
+          echo "$salida" | grep -q "changed=0" || { echo "::error::El playbook no es idempotente"; exit 1; }
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \

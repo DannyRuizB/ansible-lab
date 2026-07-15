@@ -1,0 +1,8 @@
+---
+# Incluido una vez POR ITEM desde el playbook 12 (include_tasks + loop).
+# import_tasks no admite loop — otra diferencia estático/dinámico.
+- name: Instalar el componente {{ componente }}
+  ansible.builtin.copy:
+    dest: "{{ modular_base }}/componente_{{ componente }}.txt"
+    content: "componente {{ componente }} instalado\n"
+    mode: "0644"

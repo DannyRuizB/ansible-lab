@@ -1,0 +1,86 @@
+---
+# =============================================================================
+# Playbook 12 — import_tasks vs include_tasks: estático contra dinámico
+#
+# Cuando un playbook crece, se trocea en ficheros de tareas. Hay DOS formas
+# de traerlos y elegir mal es fuente clásica de sustos:
+#
+#   - import_tasks (ESTÁTICO) .. se resuelve AL PARSEAR, antes de ejecutar
+#       nada. Es como copiar y pegar las tareas en el sitio del import.
+#       + los --tags y --list-tasks las ven siempre
+#       - el nombre del fichero NO puede depender de variables de ejecución
+#       - no admite loop
+#       - un `when` junto al import se COPIA a cada tarea importada
+#         (se re-evalúa tarea a tarea, no una vez)
+#
+#   - include_tasks (DINÁMICO) . se resuelve AL LLEGAR la ejecución allí.
+#       + el nombre del fichero puede venir de una variable/fact
+#       + admite loop (una inclusión por item)
+#       + su `when` se evalúa UNA vez, sobre la inclusión entera
+#       - las tareas incluidas no existen al parsear: --list-tasks no las
+#         enseña y sus tags necesitan `apply` para propagarse
+#
+# Regla de andar por casa: import por defecto (más previsible), include
+# cuando necesites decidir EN EJECUCIÓN qué fichero o cuántas veces.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/12_import_vs_include.yml
+# =============================================================================
+
+- name: Import vs include — trocear playbooks sin sustos
+  hosts: laboratorio
+  gather_facts: false
+
+  vars:
+    modular_base: "{{ playbook_dir }}/../entorno-prueba/modular"
+    entorno: laboratorio
+    componentes: [web, api]
+
+  tasks:
+    # ── import_tasks: estático ──────────────────────────────────────────
+    # Se resolvió al parsear el playbook: estas tareas aparecen en
+    # --list-tasks aunque nunca se ejecutaran. El when de aquí abajo viaja
+    # COPIADO a cada tarea del fichero.
+    - name: Traer las tareas comunes (import estático)
+      ansible.builtin.import_tasks: tasks/comunes.yml
+      when: entorno == "laboratorio"
+
+    # ── include_tasks: el fichero se elige en ejecución ────────────────
+    # La estrella del dinámico: el nombre depende de una variable. Con
+    # import_tasks esto revienta al parsear (la plantilla no puede
+    # resolverse todavía).
+    - name: Traer la configuración del entorno (include dinámico por variable)
+      ansible.builtin.include_tasks: tasks/entorno_{{ entorno }}.yml
+
+    # ── include_tasks + loop: una inclusión por item ────────────────────
+    # import_tasks no admite loop. loop_var con nombre propio para que el
+    # fichero incluido lea `componente` y no pise el `item` de otros bucles.
+    - name: Instalar cada componente (include en bucle)
+      ansible.builtin.include_tasks: tasks/instalar_componente.yml
+      loop: "{{ componentes }}"
+      loop_control:
+        loop_var: componente
+
+    # ── Verificación de la lección ──────────────────────────────────────
+    - name: Comprobar que las tres vías dejaron su marca
+      ansible.builtin.stat:
+        path: "{{ modular_base }}/{{ item }}"
+      register: marcas
+      loop:
+        - comunes.txt
+        - entorno.txt
+        - componente_web.txt
+        - componente_api.txt
+
+    - name: Confirmar el resultado
+      ansible.builtin.assert:
+        that: marcas.results | map(attribute='stat.exists') | list is all
+        success_msg: "import estático + include por variable + include en bucle: las tres vías aplicadas"
+        fail_msg: "Falta alguna marca — alguna vía no se ejecutó"
+
+    - name: Resumen de la lección
+      ansible.builtin.debug:
+        msg:
+          - "import_tasks .... resuelto al PARSEAR (comunes.txt, con when copiado a cada tarea)"
+          - "include_tasks ... fichero elegido en EJECUCIÓN (entorno_{{ entorno }}.yml)"
+          - "include + loop .. una inclusión por item ({{ componentes | join(', ') }})"

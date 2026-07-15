@@ -1,0 +1,15 @@
+---
+# Tareas comunes — las trae el playbook 12 con import_tasks (ESTÁTICO).
+# Ojo: el `when` que acompaña al import NO se evalúa una vez, se COPIA a
+# cada una de estas tareas (se ve con -v: cada tarea lo re-evalúa).
+- name: Crear el directorio del despliegue modular
+  ansible.builtin.file:
+    path: "{{ modular_base }}"
+    state: directory
+    mode: "0755"
+
+- name: Dejar la marca de las tareas comunes
+  ansible.builtin.copy:
+    dest: "{{ modular_base }}/comunes.txt"
+    content: "tareas comunes aplicadas (importadas en tiempo de parseo)\n"
+    mode: "0644"
