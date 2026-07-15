@@ -113,6 +113,15 @@ jobs:
           echo "$salida" | grep -q "changed=1 " || { echo "::error::Se esperaba changed=1 (la limpieza ensayada)"; exit 1; }
           test -d entorno-prueba/ensayo || { echo "::error::La limpieza ensayada ha borrado de verdad"; exit 1; }
 
+      - name: "Playbook 10 — facts personalizados (1ª pasada)"
+        run: ansible-playbook playbooks/10_facts_personalizados.yml
+
+      - name: "Playbook 10 — 2ª pasada: comprobar idempotencia (changed=0)"
+        run: |
+          salida=$(ansible-playbook playbooks/10_facts_personalizados.yml)
+          echo "$salida" | tail -3
+          echo "$salida" | grep -q "changed=0" || { echo "::error::El playbook no es idempotente"; exit 1; }
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \

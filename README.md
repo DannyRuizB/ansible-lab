@@ -7,7 +7,7 @@
 
 Laboratorio de aprendizaje de **Ansible** que funciona **100% en local**, en dos niveles:
 
-- **Playbooks 1-6, 8 y 9**: el "servidor" gestionado es la propia máquina (`localhost` con `ansible_connection=local`). Sin SSH, sin servidores remotos, sin permisos de administrador — todo ocurre dentro del directorio del proyecto.
+- **Playbooks 1-6 y 8-10**: el "servidor" gestionado es la propia máquina (`localhost` con `ansible_connection=local`). Sin SSH, sin servidores remotos, sin permisos de administrador — todo ocurre dentro del directorio del proyecto.
 - **Playbook 7 (opcional)**: una "flota" de 3 contenedores Docker locales gestionados **por SSH real**, para practicar inventarios multi-host. Requiere Docker, pero sigue siendo local: los contenedores solo escuchan en `127.0.0.1`.
 
 Forma parte de mi formación en automatización/DevOps con perfil de administración de sistemas (ASIR).
@@ -29,6 +29,7 @@ Forma parte de mi formación en automatización/DevOps con perfil de administrac
 | `playbooks/07_flota_multihost.yml` | **Multi-host por SSH real** — 3 contenedores Docker locales como nodos gestionados: inventario con grupos `[web]`/`[db]`, **group_vars**, paralelismo, resumen con `run_once` + `hostvars` y **rolling update** (`serial: 1` + `max_fail_percentage`) |
 | `playbooks/08_colecciones_galaxy.yml` | **Colecciones de Galaxy** — `requirements.yml` con versión + `ansible-galaxy collection install`, **FQCN**, el módulo `community.general.ini_file`, y `lookup('password')` que genera una credencial una sola vez (con `no_log` y modo 0600) y la verifica releyendo el INI |
 | `playbooks/09_ensayo_check_diff.yml` | **Modo check y diff** — el "ensayo general" (`--check --diff`) y su letra pequeña: `ansible_check_mode`, `check_mode: false` (lecturas que deben ejecutarse hasta en el ensayo), `check_mode: true` (acciones que NUNCA se aplican) y **la trampa clásica**: una verificación forzada que depende de algo que el ensayo no creó — el mismo patrón que rompía el `--check` de un repo real de hardening |
+| `playbooks/10_facts_personalizados.yml` | **Facts personalizados (facts.d)** — los dos sabores: fichero `.fact` **estático** (INI → `ansible_local.despliegue.app.version`, la "memoria" que un despliegue deja escrita en el servidor) y `.fact` **ejecutable** (script bash que imprime JSON y se ejecuta en cada gather). Incluye la letra pequeña: `fact_path` para no necesitar `/etc/ansible/facts.d` (root) y el clásico "¿por qué `ansible_local` está vacío?" — sin re-recolectar (`setup`) después de instalarlos, no existen |
 
 ## 📁 Estructura
 
@@ -54,7 +55,8 @@ ansible-lab/
 │   ├── 06_secretos_vault.yml
 │   ├── 07_flota_multihost.yml
 │   ├── 08_colecciones_galaxy.yml
-│   └── 09_ensayo_check_diff.yml
+│   ├── 09_ensayo_check_diff.yml
+│   └── 10_facts_personalizados.yml
 ├── vars/
 │   └── secretos.yml                     # secretos CIFRADOS con ansible-vault
 ├── roles/
