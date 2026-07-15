@@ -1,0 +1,124 @@
+---
+# =============================================================================
+# Playbook 10 — Facts personalizados (facts.d): enséñale a Ansible datos tuyos
+#
+# Los facts de serie (ansible_hostname, ansible_memtotal_mb...) los inventa
+# Ansible. Los facts LOCALES los inventas tú: ficheros en un directorio
+# facts.d del nodo gestionado que el gather recoge y cuelga de
+# `ansible_local.<nombre>`. Hay dos sabores:
+#
+#   - fichero .fact ESTÁTICO (formato INI o JSON): datos que alguien dejó
+#     escritos — "qué versión se desplegó aquí", "a qué entorno pertenezco".
+#     Es la memoria del servidor: sobrevive a reinicios y a quien pregunte.
+#   - fichero .fact EJECUTABLE (script con shebang, permiso de ejecución):
+#     se EJECUTA en cada gather y debe imprimir JSON — datos frescos cada vez.
+#
+# La letra pequeña que enseña este playbook:
+#   - en producción facts.d vive en /etc/ansible/facts.d (requiere root);
+#     el módulo setup acepta `fact_path`, así que el laboratorio usa un
+#     directorio propio sin sudo
+#   - los facts locales solo existen DESPUÉS de un gather: si este playbook
+#     los instala, hay que volver a recolectar (setup) para verlos —
+#     el clásico "¿por qué ansible_local está vacío?"
+#   - el nombre del fichero manda: despliegue.fact → ansible_local.despliegue
+#
+# Ejecutar:
+#   ansible-playbook playbooks/10_facts_personalizados.yml
+# =============================================================================
+
+- name: Facts personalizados — facts.d estático y ejecutable
+  hosts: laboratorio
+  # A propósito: sin gather inicial. Así se ve que ansible_local NO existe
+  # hasta que alguien recolecta facts, ni siquiera en una segunda ejecución.
+  gather_facts: false
+
+  vars:
+    # En producción: /etc/ansible/facts.d (y las tareas llevarían become: true)
+    facts_dir: "{{ playbook_dir }}/../entorno-prueba/facts.d"
+    app_version: "2.0.0"
+
+  tasks:
+    - name: Comprobar que ansible_local aún no existe (nadie ha recolectado)
+      ansible.builtin.assert:
+        that:
+          - ansible_local is not defined
+        success_msg: "ansible_local no está definido: sin gather no hay facts locales"
+        fail_msg: "ansible_local no debería existir todavía con gather_facts: false"
+
+    - name: Crear el directorio facts.d del laboratorio
+      ansible.builtin.file:
+        path: "{{ facts_dir }}"
+        state: directory
+        mode: "0755"
+
+    # ── Sabor 1: fact ESTÁTICO (INI) ────────────────────────────────────
+    # Cada sección del INI se convierte en un diccionario:
+    #   ansible_local.despliegue.app.version, .app.entorno...
+    # Lo típico es que lo escriba el playbook de despliegue al terminar,
+    # y a partir de ahí cualquier auditoría sabe qué corre en cada máquina.
+    - name: Instalar el fact estático (la "memoria" del despliegue)
+      ansible.builtin.copy:
+        dest: "{{ facts_dir }}/despliegue.fact"
+        content: |
+          # Escrito por el playbook 10 — lo lee cualquier gather posterior
+          [app]
+          version={{ app_version }}
+          entorno=laboratorio
+
+          [contacto]
+          equipo=sistemas
+        mode: "0644"
+
+    # ── Sabor 2: fact EJECUTABLE (script → JSON) ────────────────────────
+    # Permiso 0755 + shebang = el gather lo EJECUTA y parsea su stdout como
+    # JSON. Datos que no existen en los facts de serie y siempre frescos.
+    - name: Instalar el fact ejecutable (datos frescos en cada gather)
+      ansible.builtin.copy:
+        dest: "{{ facts_dir }}/recuento.fact"
+        content: |
+          #!/bin/bash
+          # Fact dinámico: se ejecuta en CADA gather — nada de datos rancios.
+          nucleos=$(nproc)
+          discos=$(ls /sys/block | wc -l)
+          procesos=$(ls -d /proc/[0-9]* | wc -l)
+          printf '{"nucleos": %s, "discos": %s, "procesos": %s}\n' \
+            "$nucleos" "$discos" "$procesos"
+        mode: "0755"
+
+    # ── El paso que todo el mundo olvida: volver a recolectar ───────────
+    # Instalar el .fact no lo publica: ansible_local se rellena al hacer
+    # gather. `fact_path` apunta al facts.d del laboratorio y `filter`
+    # recoge solo los facts locales (no hace falta el inventario completo).
+    - name: Recolectar facts otra vez, ahora con los locales (setup + fact_path)
+      ansible.builtin.setup:
+        fact_path: "{{ facts_dir }}"
+        filter: ansible_local
+
+    - name: Verificar que los dos sabores llegaron a ansible_local
+      ansible.builtin.assert:
+        that:
+          - ansible_local.despliegue.app.version == app_version
+          - ansible_local.despliegue.app.entorno == "laboratorio"
+          - ansible_local.recuento.nucleos | int >= 1
+          - ansible_local.recuento.procesos | int >= 1
+        success_msg: "facts.d funciona: estático e inteligente, los dos a bordo"
+        fail_msg: "Algún fact local no aparece — ¿se recolectó después de instalarlos?"
+
+    # Los facts locales se usan como cualquier otro fact: en when, templates...
+    - name: Actuar según el fact (esto solo corre en el entorno laboratorio)
+      ansible.builtin.debug:
+        msg: >-
+          Esta máquina declara ser del entorno
+          '{{ ansible_local.despliegue.app.entorno }}' con la versión
+          {{ ansible_local.despliegue.app.version }} desplegada.
+      when: ansible_local.despliegue.app.entorno == "laboratorio"
+
+    - name: Resumen de los facts locales
+      ansible.builtin.debug:
+        msg:
+          - "Versión desplegada ... {{ ansible_local.despliegue.app.version }}"
+          - "Entorno .............. {{ ansible_local.despliegue.app.entorno }}"
+          - "Equipo responsable ... {{ ansible_local.despliegue.contacto.equipo }}"
+          - "Núcleos (dinámico) ... {{ ansible_local.recuento.nucleos }}"
+          - "Discos (dinámico) .... {{ ansible_local.recuento.discos }}"
+          - "Procesos (dinámico) .. {{ ansible_local.recuento.procesos }}"
