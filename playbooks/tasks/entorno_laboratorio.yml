@@ -1,0 +1,9 @@
+---
+# Fichero elegido EN EJECUCIÓN por include_tasks según la variable `entorno`.
+# Con import_tasks esto es imposible: el nombre se resuelve al parsear,
+# cuando la variable aún puede no existir.
+- name: Aplicar la configuración específica del entorno laboratorio
+  ansible.builtin.copy:
+    dest: "{{ modular_base }}/entorno.txt"
+    content: "configuración del entorno: laboratorio (fichero elegido en runtime)\n"
+    mode: "0644"

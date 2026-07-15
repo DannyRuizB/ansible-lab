@@ -7,7 +7,7 @@
 
 Laboratorio de aprendizaje de **Ansible** que funciona **100% en local**, en dos niveles:
 
-- **Playbooks 1-6 y 8-11**: el "servidor" gestionado es la propia máquina (`localhost` con `ansible_connection=local`). Sin SSH, sin servidores remotos, sin permisos de administrador — todo ocurre dentro del directorio del proyecto.
+- **Playbooks 1-6 y 8-12**: el "servidor" gestionado es la propia máquina (`localhost` con `ansible_connection=local`). Sin SSH, sin servidores remotos, sin permisos de administrador — todo ocurre dentro del directorio del proyecto.
 - **Playbook 7 (opcional)**: una "flota" de 3 contenedores Docker locales gestionados **por SSH real**, para practicar inventarios multi-host. Requiere Docker, pero sigue siendo local: los contenedores solo escuchan en `127.0.0.1`.
 
 Forma parte de mi formación en automatización/DevOps con perfil de administración de sistemas (ASIR).
@@ -31,6 +31,7 @@ Forma parte de mi formación en automatización/DevOps con perfil de administrac
 | `playbooks/09_ensayo_check_diff.yml` | **Modo check y diff** — el "ensayo general" (`--check --diff`) y su letra pequeña: `ansible_check_mode`, `check_mode: false` (lecturas que deben ejecutarse hasta en el ensayo), `check_mode: true` (acciones que NUNCA se aplican) y **la trampa clásica**: una verificación forzada que depende de algo que el ensayo no creó — el mismo patrón que rompía el `--check` de un repo real de hardening |
 | `playbooks/10_facts_personalizados.yml` | **Facts personalizados (facts.d)** — los dos sabores: fichero `.fact` **estático** (INI → `ansible_local.despliegue.app.version`, la "memoria" que un despliegue deja escrita en el servidor) y `.fact` **ejecutable** (script bash que imprime JSON y se ejecuta en cada gather). Incluye la letra pequeña: `fact_path` para no necesitar `/etc/ansible/facts.d` (root) y el clásico "¿por qué `ansible_local` está vacío?" — sin re-recolectar (`setup`) después de instalarlos, no existen |
 | `playbooks/11_esperas_y_reintentos.yml` | **Esperas y reintentos** — la mitad del trabajo real de automatización: **async + poll: 0** (dispara y sigue: la tarea lenta corre en background y el playbook no se bloquea), **async_status** con **retries/until** (el bucle de espera con timeout real = retries × delay), **wait_for** con `search_regex` (esperar a un fichero/puerto/cadena) y **delegate_to** (la comprobación corre donde tú digas, no en el host del play). Incluye la trampa cazada al verificar: en una tarea async, `changed_when` fijo pisa el skip de `creates:` — idempotencia con guard explícito stat + when |
+| `playbooks/12_import_vs_include.yml` | **import_tasks vs include_tasks** — estático contra dinámico, la fuente clásica de sustos al trocear playbooks: import se resuelve al **parsear** (su `when` se COPIA a cada tarea importada, sin loop, sin variables en el nombre), include al **ejecutar** (fichero elegido por variable — `entorno_{{ entorno }}.yml` —, `loop` con `loop_var` propio, when evaluado una vez). Con las tres vías demostradas sobre `playbooks/tasks/` y verificación con `assert` |
 
 ## 📁 Estructura
 
@@ -58,7 +59,9 @@ ansible-lab/
 │   ├── 08_colecciones_galaxy.yml
 │   ├── 09_ensayo_check_diff.yml
 │   ├── 10_facts_personalizados.yml
-│   └── 11_esperas_y_reintentos.yml
+│   ├── 11_esperas_y_reintentos.yml
+│   ├── 12_import_vs_include.yml
+│   └── tasks/                           # ficheros de tareas del playbook 12
 ├── vars/
 │   └── secretos.yml                     # secretos CIFRADOS con ansible-vault
 ├── roles/
