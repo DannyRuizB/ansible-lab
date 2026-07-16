@@ -127,7 +127,10 @@
     - name: "Free: algún rápido terminó TODO antes de que el lento sellara el 1"
       ansible.builtin.assert:
         that: free_s2 | min < free_s1 | max
-        success_msg: "Sin barrera: min(sello2)={{ '%.2f' | format(free_s2 | min) }} < max(sello1)={{ '%.2f' | format(free_s1 | max) }} — el web no esperó los 6 s de db1"
+        success_msg: >-
+          Sin barrera: min(sello2)={{ '%.2f' | format(free_s2 | min) }}
+          < max(sello1)={{ '%.2f' | format(free_s1 | max) }}
+          — el web no esperó los 6 s de db1
         fail_msg: "Nadie adelantó al lento — eso parece linear, no free"
 
     # La flota son 3 hosts (inventario_flota.ini) — dos comparaciones bastan.
@@ -136,7 +139,11 @@
         that:
           - embudo_pares[1][0] >= embudo_pares[0][1]
           - embudo_pares[2][0] >= embudo_pares[1][1]
-        success_msg: "Sin solapes: entradas a +{{ '%.1f' | format(embudo_pares[1][0] - embudo_pares[0][1]) }} s y +{{ '%.1f' | format(embudo_pares[2][0] - embudo_pares[1][1]) }} s tras la salida anterior"
+        success_msg: >-
+          Sin solapes: entradas a
+          +{{ '%.1f' | format(embudo_pares[1][0] - embudo_pares[0][1]) }} s y
+          +{{ '%.1f' | format(embudo_pares[2][0] - embudo_pares[1][1]) }} s
+          tras la salida anterior
         fail_msg: "Dos hosts estuvieron dentro del embudo a la vez — eso no es throttle: 1"
 
     - name: Resumen de la lección
