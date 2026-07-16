@@ -8,7 +8,7 @@
 Laboratorio de aprendizaje de **Ansible** que funciona **100% en local**, en dos niveles:
 
 - **Playbooks 1-6 y 8-12**: el "servidor" gestionado es la propia máquina (`localhost` con `ansible_connection=local`). Sin SSH, sin servidores remotos, sin permisos de administrador — todo ocurre dentro del directorio del proyecto.
-- **Playbook 7 (opcional)**: una "flota" de 3 contenedores Docker locales gestionados **por SSH real**, para practicar inventarios multi-host. Requiere Docker, pero sigue siendo local: los contenedores solo escuchan en `127.0.0.1`.
+- **Playbooks 7 y 13 (opcionales)**: una "flota" de 3 contenedores Docker locales gestionados **por SSH real**, para practicar inventarios multi-host y estrategias de ejecución. Requiere Docker, pero sigue siendo local: los contenedores solo escuchan en `127.0.0.1`.
 
 Forma parte de mi formación en automatización/DevOps con perfil de administración de sistemas (ASIR).
 
@@ -32,6 +32,7 @@ Forma parte de mi formación en automatización/DevOps con perfil de administrac
 | `playbooks/10_facts_personalizados.yml` | **Facts personalizados (facts.d)** — los dos sabores: fichero `.fact` **estático** (INI → `ansible_local.despliegue.app.version`, la "memoria" que un despliegue deja escrita en el servidor) y `.fact` **ejecutable** (script bash que imprime JSON y se ejecuta en cada gather). Incluye la letra pequeña: `fact_path` para no necesitar `/etc/ansible/facts.d` (root) y el clásico "¿por qué `ansible_local` está vacío?" — sin re-recolectar (`setup`) después de instalarlos, no existen |
 | `playbooks/11_esperas_y_reintentos.yml` | **Esperas y reintentos** — la mitad del trabajo real de automatización: **async + poll: 0** (dispara y sigue: la tarea lenta corre en background y el playbook no se bloquea), **async_status** con **retries/until** (el bucle de espera con timeout real = retries × delay), **wait_for** con `search_regex` (esperar a un fichero/puerto/cadena) y **delegate_to** (la comprobación corre donde tú digas, no en el host del play). Incluye la trampa cazada al verificar: en una tarea async, `changed_when` fijo pisa el skip de `creates:` — idempotencia con guard explícito stat + when |
 | `playbooks/12_import_vs_include.yml` | **import_tasks vs include_tasks** — estático contra dinámico, la fuente clásica de sustos al trocear playbooks: import se resuelve al **parsear** (su `when` se COPIA a cada tarea importada, sin loop, sin variables en el nombre), include al **ejecutar** (fichero elegido por variable — `entorno_{{ entorno }}.yml` —, `loop` con `loop_var` propio, when evaluado una vez). Con las tres vías demostradas sobre `playbooks/tasks/` y verificación con `assert` |
+| `playbooks/13_estrategias_ejecucion.yml` | **Estrategias de ejecución** (sobre la flota) — **linear** (barrera por tarea: el host lento marca el paso de todos), **free** (cada host a su ritmo: los rápidos no esperan) y **throttle** (embudo por TAREA — de N en N aunque la play sea free; `serial` trocea la PLAY, visto en el 7). Demostrado con sellos de tiempo y `assert`: la barrera de linear se cumple, en free un web termina todo antes de que db1 acabe su primera tarea, y en el embudo nadie entra hasta que sale el anterior. Incluye la trampa de medición cazada al escribirlo: con free, un `set_fact` posterior mide cuándo el scheduler procesó el resultado (llegan a rachas), no cuándo corrió la tarea — los sellos van dentro del comando, con el reloj remoto |
 
 ## 📁 Estructura
 
@@ -113,15 +114,16 @@ ansible-galaxy collection install -r requirements.yml
 ansible-playbook playbooks/08_colecciones_galaxy.yml
 ```
 
-## 🚢 Flota multi-host (playbook 7)
+## 🚢 Flota multi-host (playbooks 7 y 13)
 
-El único playbook que sale de `localhost`: gestiona **3 "servidores" con SSH de verdad** — contenedores Docker locales (`web1`, `web2`, `db1`) que escuchan solo en `127.0.0.1`. Requiere Docker (en WSL: `sudo apt-get install -y docker.io && sudo usermod -aG docker $USER`, y reabrir la terminal).
+Los únicos playbooks que salen de `localhost`: gestionan **3 "servidores" con SSH de verdad** — contenedores Docker locales (`web1`, `web2`, `db1`) que escuchan solo en `127.0.0.1`. Requiere Docker (en WSL: `sudo apt-get install -y docker.io && sudo usermod -aG docker $USER`, y reabrir la terminal).
 
 ```bash
 ./flota.sh up          # clave SSH del lab + imagen + 3 contenedores
 ./flota.sh esperar     # espera a que el sshd de los 3 nodos esté listo
 ansible -i inventario_flota.ini flota -m ping
 ansible-playbook -i inventario_flota.ini playbooks/07_flota_multihost.yml
+ansible-playbook -i inventario_flota.ini playbooks/13_estrategias_ejecucion.yml
 ./flota.sh down        # apagar y eliminar la flota (no queda nada corriendo)
 ```
 

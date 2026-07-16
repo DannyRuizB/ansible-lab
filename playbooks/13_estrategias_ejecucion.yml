@@ -1,0 +1,148 @@
+---
+# =============================================================================
+# Playbook 13 — Estrategias de ejecución: linear, free y throttle
+#
+# Ansible decide CÓMO avanza una play por la flota con la estrategia:
+#
+#   - linear (la de serie) . tarea a tarea con BARRERA: ningún host empieza
+#       la tarea N+1 hasta que TODOS terminaron la tarea N. Previsible, pero
+#       el host más lento marca el paso de toda la flota.
+#
+#   - free ................ cada host avanza a su ritmo por la lista de
+#       tareas, sin esperar a nadie. Los rápidos terminan antes; a cambio,
+#       la salida se entremezcla y nada garantiza estados sincronizados.
+#
+#   - throttle: N ......... por TAREA (no por play): como mucho N hosts a la
+#       vez en esa tarea, aunque la estrategia sea free. Para lo que no
+#       aguanta avalanchas: reinicios contra un balanceador, un repositorio
+#       débil, la API de un vCenter...
+#
+#   (serial: N es otra cosa — trocea la PLAY en tandas de hosts; se vio en
+#    el playbook 07 con el rolling update de la flota.)
+#
+# La demo mide con sellos de tiempo (reloj del CONTROLADOR, un único reloj
+# para todos): db1 "trabaja" 6 s por tarea y los web nada, así el efecto de
+# cada estrategia se ve en los números y se comprueba con asserts.
+#
+# Ejecutar (necesita la flota):
+#   ./flota.sh up && ./flota.sh esperar
+#   ansible-playbook -i inventario_flota.ini playbooks/13_estrategias_ejecucion.yml
+# =============================================================================
+
+# ── Play 1: LINEAR — la barrera hace que el lento frene a todos ─────────────
+- name: Estrategia linear — el host lento marca el paso
+  hosts: flota
+  gather_facts: false
+  strategy: linear # la de serie; explícita por didáctica
+
+  tasks:
+    - name: Trabajo 1 (db1 tarda 6 s, los web nada)
+      ansible.builtin.command: sleep {{ '6' if inventory_hostname == 'db1' else '0' }}
+      changed_when: false
+
+    - name: Sello tras el trabajo 1
+      ansible.builtin.set_fact:
+        linear_sello1: "{{ now(fmt='%s.%f') | float }}"
+
+    - name: Trabajo 2 (mismo reparto)
+      ansible.builtin.command: sleep {{ '6' if inventory_hostname == 'db1' else '0' }}
+      changed_when: false
+
+    - name: Sello tras el trabajo 2
+      ansible.builtin.set_fact:
+        linear_sello2: "{{ now(fmt='%s.%f') | float }}"
+
+# ── Play 2: FREE — cada host a su ritmo, el rápido no espera ────────────────
+- name: Estrategia free — los rápidos terminan sin esperar al lento
+  hosts: flota
+  gather_facts: false
+  strategy: free
+
+  tasks:
+    - name: Trabajo 1 (db1 tarda 6 s, los web nada)
+      ansible.builtin.command: sleep {{ '6' if inventory_hostname == 'db1' else '0' }}
+      changed_when: false
+
+    - name: Sello tras el trabajo 1
+      ansible.builtin.set_fact:
+        free_sello1: "{{ now(fmt='%s.%f') | float }}"
+
+    - name: Trabajo 2 (mismo reparto)
+      ansible.builtin.command: sleep {{ '6' if inventory_hostname == 'db1' else '0' }}
+      changed_when: false
+
+    - name: Sello tras el trabajo 2
+      ansible.builtin.set_fact:
+        free_sello2: "{{ now(fmt='%s.%f') | float }}"
+
+# ── Play 3: THROTTLE — de uno en uno aunque la estrategia sea free ──────────
+- name: Throttle — embudo por tarea, no por play
+  hosts: flota
+  gather_facts: false
+  strategy: free
+
+  tasks:
+    # throttle: 1 = esta tarea la ejecuta UN host a la vez, aunque la play
+    # sea free. OJO medición: aquí los sellos van DENTRO del comando (reloj
+    # remoto; los contenedores comparten reloj con el host). Un set_fact
+    # posterior mediría cuándo el scheduler de free procesó el RESULTADO,
+    # no cuándo corrió la tarea — los resultados llegan a rachas y pintan
+    # solapes que no existieron (nos pasó al escribir esta demo).
+    - name: Trabajo delicado (2 s, de uno en uno)
+      ansible.builtin.command: sh -c 'echo INI $(date +%s.%N); sleep 2; echo FIN $(date +%s.%N)'
+      changed_when: false
+      throttle: 1
+      register: embudo
+
+    - name: Guardar el intervalo del embudo
+      ansible.builtin.set_fact:
+        throttle_ini: "{{ embudo.stdout_lines[0].split() | last }}"
+        throttle_fin: "{{ embudo.stdout_lines[1].split() | last }}"
+
+# ── Verificación: los sellos cuentan la historia ────────────────────────────
+- name: Comprobar que cada estrategia hizo lo que promete
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    flota_hosts: "{{ groups['flota'] }}"
+    # Sellos de toda la flota, como listas de floats.
+    linear_s1: "{{ flota_hosts | map('extract', hostvars, 'linear_sello1') | map('float') | list }}"
+    linear_s2: "{{ flota_hosts | map('extract', hostvars, 'linear_sello2') | map('float') | list }}"
+    free_s1: "{{ flota_hosts | map('extract', hostvars, 'free_sello1') | map('float') | list }}"
+    free_s2: "{{ flota_hosts | map('extract', hostvars, 'free_sello2') | map('float') | list }}"
+    # Intervalos [entrada, salida] del embudo, ordenados por entrada.
+    embudo_pares: >-
+      {{ flota_hosts | map('extract', hostvars, 'throttle_ini') | map('float')
+         | zip(flota_hosts | map('extract', hostvars, 'throttle_fin') | map('float'))
+         | sort }}
+
+  tasks:
+    - name: "Linear: nadie selló el trabajo 2 antes de que TODOS sellaran el 1"
+      ansible.builtin.assert:
+        that: linear_s2 | min >= linear_s1 | max
+        success_msg: "Barrera respetada: min(sello2)={{ '%.2f' | format(linear_s2 | min) }} >= max(sello1)={{ '%.2f' | format(linear_s1 | max) }}"
+        fail_msg: "Un host cruzó la barrera — eso no es linear"
+
+    - name: "Free: algún rápido terminó TODO antes de que el lento sellara el 1"
+      ansible.builtin.assert:
+        that: free_s2 | min < free_s1 | max
+        success_msg: "Sin barrera: min(sello2)={{ '%.2f' | format(free_s2 | min) }} < max(sello1)={{ '%.2f' | format(free_s1 | max) }} — el web no esperó los 6 s de db1"
+        fail_msg: "Nadie adelantó al lento — eso parece linear, no free"
+
+    # La flota son 3 hosts (inventario_flota.ini) — dos comparaciones bastan.
+    - name: "Throttle: nadie entró al embudo antes de que saliera el anterior"
+      ansible.builtin.assert:
+        that:
+          - embudo_pares[1][0] >= embudo_pares[0][1]
+          - embudo_pares[2][0] >= embudo_pares[1][1]
+        success_msg: "Sin solapes: entradas a +{{ '%.1f' | format(embudo_pares[1][0] - embudo_pares[0][1]) }} s y +{{ '%.1f' | format(embudo_pares[2][0] - embudo_pares[1][1]) }} s tras la salida anterior"
+        fail_msg: "Dos hosts estuvieron dentro del embudo a la vez — eso no es throttle: 1"
+
+    - name: Resumen de la lección
+      ansible.builtin.debug:
+        msg:
+          - "linear ..... barrera por tarea: la flota va al paso del host más lento"
+          - "free ....... cada host a su ritmo: los rápidos acabaron ~{{ '%.0f' | format((free_s1 | max) - (free_s2 | min)) }} s antes que el lento"
+          - "throttle ... embudo por tarea (aquí de 1 en 1), aunque la play sea free"
+          - "serial ..... tandas de hosts por play — visto en el playbook 07"

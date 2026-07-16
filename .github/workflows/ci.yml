@@ -192,6 +192,12 @@ jobs:
           ceros=$(echo "$salida" | grep -c "changed=0" || true)
           [ "$ceros" = "3" ] || { echo "::error::Algún nodo no fue idempotente"; exit 1; }
 
+      # Los asserts del playbook comprueban las tres lecciones (barrera de
+      # linear, adelantamiento en free, embudo sin solapes) — si una
+      # estrategia no hace lo que promete, el playbook mismo falla.
+      - name: "Playbook 13 — estrategias de ejecución (asserts incluidos)"
+        run: ansible-playbook -i inventario_flota.ini playbooks/13_estrategias_ejecucion.yml
+
       - name: Apagar la flota
         if: always()
         run: ./flota.sh down
