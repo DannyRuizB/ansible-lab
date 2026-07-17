@@ -198,6 +198,12 @@ jobs:
       - name: "Playbook 13 — estrategias de ejecución (asserts incluidos)"
         run: ansible-playbook -i inventario_flota.ini playbooks/13_estrategias_ejecucion.yml
 
+      # Los asserts cuentan ejecuciones en ficheros del controlador: si la
+      # delegación, delegate_facts o run_once (con y sin serial) no hacen lo
+      # que el playbook enseña, el propio playbook falla.
+      - name: "Playbook 14 — delegación y run_once (asserts incluidos)"
+        run: ansible-playbook -i inventario_flota.ini playbooks/14_delegacion_y_run_once.yml
+
       - name: Apagar la flota
         if: always()
         run: ./flota.sh down
