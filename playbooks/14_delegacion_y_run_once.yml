@@ -1,0 +1,208 @@
+---
+# =============================================================================
+# Playbook 14 — Delegación y run_once: QUIÉN ejecuta y DE QUIÉN son los datos
+#
+# Dos preguntas distintas que Ansible responde por separado:
+#
+#   - delegate_to: X ....... la tarea CORRE en X, pero el register y el
+#       inventory_hostname siguen siendo del host que la "encargó". Típico:
+#       comprobar un servicio desde otro punto de vista, tocar el balanceador
+#       mientras se actualiza un web, avisar a un sistema central.
+#
+#   - delegate_facts ....... cuando la tarea delegada es `setup` (facts),
+#       decide DÓNDE se guardan: sin ella, los facts de X machacan los del
+#       host que delega (¡web1 pasa a creerse db1!); con ella van a
+#       hostvars[X], que es casi siempre lo que se quería.
+#
+#   - run_once ............. la tarea se ejecuta una vez por PLAY... hasta
+#       que aparece serial: entonces es una vez POR TANDA. Para "una vez de
+#       verdad" con serial, la condición se ata al inventario:
+#       when: inventory_hostname == groups['flota'][0]
+#
+# La demo cuenta ejecuciones en ficheros del CONTROLADOR (delegate_to:
+# localhost) y lo comprueba con asserts al final.
+#
+# Ejecutar (necesita la flota):
+#   ./flota.sh up && ./flota.sh esperar
+#   ansible-playbook -i inventario_flota.ini playbooks/14_delegacion_y_run_once.yml
+# =============================================================================
+
+# ── Play 0: terreno limpio para los contadores ──────────────────────────────
+- name: Preparar los contadores de la demo en el controlador
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Borrar restos de ejecuciones anteriores
+      ansible.builtin.file:
+        path: /tmp/ansible-lab-14
+        state: absent
+
+    - name: Carpeta nueva para los contadores
+      ansible.builtin.file:
+        path: /tmp/ansible-lab-14
+        state: directory
+        mode: "0755"
+
+# ── Play 1: delegate_to — corre ALLÍ, el resultado es de AQUÍ ────────────────
+- name: Delegate_to — la tarea corre en otro nodo, el register es del que delega
+  hosts: flota
+  gather_facts: false
+
+  tasks:
+    - name: Hostname normal (cada host ejecuta en su casa)
+      ansible.builtin.command: hostname
+      changed_when: false
+      register: yo
+
+    # Los TRES hosts de la play ejecutan esta tarea... y las tres ejecuciones
+    # ocurren EN db1 (tres conexiones a db1). Pero cada register pertenece al
+    # host de inventario que delegó, no a db1.
+    - name: Hostname delegado — los tres lo ejecutan EN db1
+      ansible.builtin.command: hostname
+      delegate_to: db1
+      changed_when: false
+      register: delegado
+
+    - name: "Comprobar: la ejecución fue en db1, el resultado es mío"
+      ansible.builtin.assert:
+        that:
+          - yo.stdout == inventory_hostname
+          - delegado.stdout == 'db1'
+        success_msg: >-
+          {{ inventory_hostname }}: mi hostname es {{ yo.stdout }} y mi tarea
+          delegada dice {{ delegado.stdout }} — corrió en db1, el register es mío
+        fail_msg: "La delegación no hizo lo esperado"
+
+# ── Play 2: delegate_facts — dónde aterrizan los facts delegados ────────────
+- name: Delegate_facts — sin ella, los facts ajenos machacan los propios
+  hosts: web1
+  gather_facts: true # web1 arranca sabiendo quién es
+
+  tasks:
+    - name: "Antes de nada: web1 sabe que es web1"
+      ansible.builtin.assert:
+        that: ansible_hostname == 'web1'
+        quiet: true
+
+    # LA TRAMPA: setup delegado SIN delegate_facts. La tarea corre en db1,
+    # pero los facts devueltos se asignan al host que delega... y web1 pasa
+    # a creerse db1. Cualquier template posterior ({{ ansible_hostname }},
+    # rutas, configs) sale con datos del host equivocado.
+    - name: Recoger facts de db1 SIN delegate_facts (contaminación)
+      ansible.builtin.setup:
+      delegate_to: db1
+
+    - name: "Comprobar la contaminación: web1 ahora se cree db1"
+      ansible.builtin.assert:
+        that: ansible_hostname == 'db1'
+        success_msg: "Contaminado, como avisa la doc: ansible_hostname={{ ansible_hostname }} en web1"
+        fail_msg: "Se esperaba la contaminación clásica y no ocurrió"
+
+    # LO CORRECTO: delegate_facts: true → los facts de db1 van a
+    # hostvars['db1'] y los del que delega quedan intactos.
+    - name: Recoger facts de db1 CON delegate_facts (aterrizan en db1)
+      ansible.builtin.setup:
+      delegate_to: db1
+      delegate_facts: true
+
+    - name: Reparar los facts de web1 (volver a recogerlos en casa)
+      ansible.builtin.setup:
+
+    - name: "Comprobar: cada uno vuelve a ser quien era"
+      ansible.builtin.assert:
+        that:
+          - ansible_hostname == 'web1'
+          - hostvars['db1'].ansible_hostname == 'db1'
+        success_msg: "web1 es web1 otra vez y hostvars['db1'] tiene los facts de db1"
+        fail_msg: "Los facts no quedaron donde debían"
+
+# ── Play 3: run_once sin serial — de verdad una sola vez ────────────────────
+- name: Run_once a secas — una ejecución por play
+  hosts: flota
+  gather_facts: false
+
+  tasks:
+    # Corre en el PRIMER host de la play (web1) y el resto la da por hecha.
+    # Con delegate_to: localhost es el patrón "avisar una vez al sistema
+    # central" (un Slack, un CMDB, abrir la ventana de mantenimiento...).
+    - name: Anunciar el despliegue (una vez, desde el controlador)
+      ansible.builtin.shell: >-
+        echo "anuncio de {{ inventory_hostname }}"
+        >> /tmp/ansible-lab-14/sin_serial.txt
+      delegate_to: localhost
+      run_once: true
+      changed_when: true
+
+# ── Play 4: LA TRAMPA — con serial, run_once es una vez POR TANDA ───────────
+- name: Run_once con serial — se repite en cada tanda
+  hosts: flota
+  serial: 1 # rolling update: tandas de 1 host → 3 tandas
+  gather_facts: false
+
+  tasks:
+    # Cada tanda es una "mini-play": run_once se reinicia con ella. Con
+    # serial: 1 y 3 hosts, este anuncio sale TRES veces — si era el aviso
+    # de mantenimiento, acabas de abrir tres ventanas.
+    - name: Anuncio con run_once (saldrá una vez por tanda)
+      ansible.builtin.shell: >-
+        echo "anuncio de {{ inventory_hostname }}"
+        >> /tmp/ansible-lab-14/con_serial.txt
+      delegate_to: localhost
+      run_once: true
+      changed_when: true
+
+    # "Una vez de verdad" bajo serial: condición atada al INVENTARIO, que no
+    # cambia con las tandas. Solo la cumple el primer host del grupo, esté
+    # en la tanda que esté.
+    - name: Anuncio global de verdad (condición por inventario)
+      ansible.builtin.shell: >-
+        echo "anuncio de {{ inventory_hostname }}"
+        >> /tmp/ansible-lab-14/global.txt
+      delegate_to: localhost
+      when: inventory_hostname == groups['flota'][0]
+      changed_when: true
+
+# ── Verificación: los contadores cuentan la historia ────────────────────────
+- name: Comprobar cuántas veces corrió cada anuncio
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    contadores: /tmp/ansible-lab-14
+    sin_serial: "{{ lookup('file', contadores + '/sin_serial.txt').splitlines() }}"
+    con_serial: "{{ lookup('file', contadores + '/con_serial.txt').splitlines() }}"
+    global_txt: "{{ lookup('file', contadores + '/global.txt').splitlines() }}"
+
+  tasks:
+    - name: "Sin serial: run_once corrió UNA vez (en el primer host de la play)"
+      ansible.builtin.assert:
+        that:
+          - sin_serial | length == 1
+          - sin_serial[0] == 'anuncio de ' + groups['flota'][0]
+        success_msg: "1 línea, de {{ groups['flota'][0] }} — run_once cumplió"
+        fail_msg: "Se esperaba 1 línea y hay {{ sin_serial | length }}"
+
+    - name: "Con serial: run_once corrió una vez POR TANDA (3 tandas = 3 líneas)"
+      ansible.builtin.assert:
+        that: con_serial | length == groups['flota'] | length
+        success_msg: >-
+          {{ con_serial | length }} líneas para {{ groups['flota'] | length }}
+          tandas — run_once se reinicia con cada tanda de serial
+        fail_msg: "Se esperaban {{ groups['flota'] | length }} líneas y hay {{ con_serial | length }}"
+
+    - name: "La condición por inventario sí es global: 1 línea aunque haya serial"
+      ansible.builtin.assert:
+        that:
+          - global_txt | length == 1
+          - global_txt[0] == 'anuncio de ' + groups['flota'][0]
+        success_msg: "1 línea — when: inventory_hostname == groups['flota'][0] no entiende de tandas"
+        fail_msg: "Se esperaba 1 línea y hay {{ global_txt | length }}"
+
+    - name: Resumen de la lección
+      ansible.builtin.debug:
+        msg:
+          - "delegate_to ..... corre allí, el register es del que delega"
+          - "delegate_facts .. sin ella, un setup delegado te machaca los facts propios"
+          - "run_once ........ una vez por play... pero una vez POR TANDA si hay serial"
+          - "global bajo serial: when atado al inventario (groups['flota'][0])"
