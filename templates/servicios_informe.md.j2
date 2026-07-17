@@ -1,0 +1,32 @@
+#jinja2: trim_blocks: True, lstrip_blocks: True
+{# =========================================================================
+   Plantilla del playbook 15 — Jinja avanzado.
+
+   - La primera línea es una DIRECTIVA de plantilla (no sale en el render):
+     trim_blocks quita el salto de línea que sigue a cada {% %} y
+     lstrip_blocks el sangrado que lo precede — sin ellas, cada bloque de
+     control deja huecos y la tabla sale a trompicones.
+   - Un MACRO es una función de plantilla: la fila se define una vez y se
+     reutiliza; si mañana cambia el formato, se toca un solo sitio.
+   - groupby('entorno') agrupa la lista en pares (clave, elementos) YA
+     ordenados por clave; dentro, sort(attribute=...) ordena cada grupo.
+   ========================================================================= #}
+{% macro fila(svc) %}
+| {{ svc.nombre }} | {{ svc.puerto }} | {{ 'activo' if svc.activo else 'PARADO' }} |
+{% endmacro %}
+# Informe de servicios del laboratorio
+
+{% for entorno, servicios in servicios_lab | groupby('entorno') %}
+## Entorno {{ entorno }}
+
+| Servicio | Puerto | Estado |
+|---|---|---|
+{% for svc in servicios | sort(attribute='puerto') %}
+{# El macro ya termina en salto de línea; el guion de `-}}` recorta el
+   salto LITERAL que sigue a la expresión — sin él, cada fila dejaría una
+   línea en blanco y la tabla Markdown se rompería. #}
+{{ fila(svc) -}}
+{% endfor %}
+
+{% endfor %}
+Total: {{ servicios_lab | length }} servicios, {{ servicios_lab | selectattr('activo') | list | length }} activos.

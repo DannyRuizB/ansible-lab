@@ -140,6 +140,15 @@ jobs:
           echo "$salida" | tail -3
           echo "$salida" | grep -q "changed=0" || { echo "::error::El playbook no es idempotente"; exit 1; }
 
+      - name: "Playbook 15 — Jinja avanzado (1ª pasada, asserts incluidos)"
+        run: ansible-playbook playbooks/15_plantillas_jinja_avanzadas.yml
+
+      - name: "Playbook 15 — 2ª pasada: comprobar idempotencia (changed=0)"
+        run: |
+          salida=$(ansible-playbook playbooks/15_plantillas_jinja_avanzadas.yml)
+          echo "$salida" | tail -3
+          echo "$salida" | grep -q "changed=0" || { echo "::error::El playbook no es idempotente"; exit 1; }
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \

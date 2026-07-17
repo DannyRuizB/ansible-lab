@@ -1,0 +1,133 @@
+---
+# =============================================================================
+# Playbook 15 — Jinja avanzado: macros, filtros encadenados y sus trampas
+#
+# La mitad de Ansible es Jinja. Este playbook enseña lo que aparece en
+# cuanto una plantilla pasa de "rellenar huecos" a transformar datos:
+#
+#   - Filtros encadenados ..... selectattr / rejectattr (filtrar listas de
+#       dicts), groupby (agrupar por clave, ya ordenado), items2dict /
+#       dict2items (lista <-> diccionario), sort(attribute=...).
+#
+#   - LA TRAMPA de default() .. default('x') solo aplica si la variable NO
+#       EXISTE. Una cadena vacía, un 0 o un false SON valores y pasan tal
+#       cual. Para tratar lo "falsy" como ausente: default('x', true).
+#
+#   - Macros ................... funciones de plantilla: la fila de la
+#       tabla se define una vez y se llama por grupo (una sola fuente si
+#       cambia el formato).
+#
+#   - Control de espacios ...... la directiva `#jinja2: trim_blocks:
+#       True, lstrip_blocks: True` en la primera línea de la plantilla, y
+#       el guion de `{{ ... -}}`: sin ellos los bloques {% %} dejan
+#       huecos y las tablas salen a trompicones.
+#
+#   - lookup('template') ....... renderiza la MISMA plantilla a una
+#       variable, sin escribir fichero — lo que usa el módulo template por
+#       debajo, expuesto donde tú quieras.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/15_plantillas_jinja_avanzadas.yml
+# =============================================================================
+
+- name: Jinja avanzado sobre un inventario de servicios de juguete
+  hosts: laboratorio
+  gather_facts: false
+
+  vars:
+    carpeta_informes: "{{ playbook_dir }}/../informes"
+    # El dato de partida: una lista de dicts, como la que devolvería un
+    # módulo de inventario o una API.
+    servicios_lab:
+      - { nombre: web, puerto: 8080, entorno: produccion, activo: true }
+      - { nombre: api, puerto: 3000, entorno: produccion, activo: true }
+      - { nombre: db, puerto: 5432, entorno: produccion, activo: false }
+      - { nombre: web-pre, puerto: 8081, entorno: preproduccion, activo: true }
+      - { nombre: mock-pagos, puerto: 9099, entorno: preproduccion, activo: false }
+    cadena_vacia: ""
+
+  tasks:
+    # ── 1. Filtros encadenados sobre listas de dicts ────────────────────────
+    - name: "Filtrar y transformar: selectattr, rejectattr, items2dict"
+      ansible.builtin.assert:
+        that:
+          # selectattr sin argumento extra = "el atributo es truthy".
+          - servicios_lab | selectattr('activo') | list | length == 3
+          # rejectattr con test explícito: los parados de producción.
+          - servicios_lab | selectattr('entorno', 'eq', 'produccion')
+            | rejectattr('activo') | map(attribute='nombre') | list == ['db']
+          # items2dict convierte la lista en {nombre: puerto} — la forma
+          # cómoda de buscar por clave sin bucles.
+          - (servicios_lab | items2dict(key_name='nombre', value_name='puerto'))['api'] == 3000
+        success_msg: "3 activos, 'db' es el único parado de producción, api escucha en 3000"
+
+    - name: "Agrupar: groupby devuelve pares (clave, elementos) ya ordenados"
+      ansible.builtin.assert:
+        that:
+          - grupos | map('first') | list == ['preproduccion', 'produccion']
+          - (grupos | last | last | length) == 3
+        success_msg: "2 grupos en orden alfabético; producción tiene 3 servicios"
+      vars:
+        grupos: "{{ servicios_lab | groupby('entorno') }}"
+
+    # ── 2. La trampa de default() ───────────────────────────────────────────
+    # cadena_vacia EXISTE (vale ''), así que default('relleno') no toca
+    # nada — el clásico "¿por qué mi default no aplica?". El segundo
+    # argumento (true) trata también lo falsy ('', 0, false) como ausente.
+    - name: "La trampa de default(): una cadena vacía no se rellena sin el segundo argumento"
+      ansible.builtin.assert:
+        that:
+          - (cadena_vacia | default('relleno')) == ''
+          - (cadena_vacia | default('relleno', true)) == 'relleno'
+          - (variable_inexistente | default('relleno')) == 'relleno'
+        success_msg: "'' es un VALOR para default(); solo default(x, true) lo trata como hueco"
+
+    # ── 3. La plantilla con macro, groupby y control de espacios ────────────
+    - name: Asegurar que existe la carpeta de informes
+      ansible.builtin.file:
+        path: "{{ carpeta_informes }}"
+        state: directory
+        mode: "0755"
+
+    - name: Renderizar el informe de servicios (macro + groupby)
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/servicios_informe.md.j2"
+        dest: "{{ carpeta_informes }}/servicios_lab.md"
+        mode: "0644"
+
+    # ── 4. lookup('template'): el mismo render, a una variable ──────────────
+    # Mismo motor y misma plantilla que el módulo template — si ambos
+    # coinciden byte a byte, entendemos de verdad qué escribe el módulo.
+    - name: El lookup y el módulo producen exactamente el mismo texto
+      ansible.builtin.assert:
+        that:
+          - lookup('template', playbook_dir + '/../templates/servicios_informe.md.j2')
+            == lookup('file', carpeta_informes + '/servicios_lab.md') + '\n'
+        success_msg: "Render idéntico (lookup('file') recorta el \\n final; por eso se re-añade)"
+        fail_msg: "El render del lookup no coincide con el fichero escrito"
+
+    # ── 5. El contenido cuenta la historia completa ─────────────────────────
+    - name: Comprobar el informe renderizado
+      ansible.builtin.assert:
+        that:
+          - "'## Entorno preproduccion' in informe"
+          - "'## Entorno produccion' in informe"
+          - "'| api | 3000 | activo |' in informe"
+          - "'| db | 5432 | PARADO |' in informe"
+          - "'Total: 5 servicios, 3 activos.' in informe"
+          # Control de espacios: las filas de una tabla van SEGUIDAS —
+          # sin trim_blocks/lstrip_blocks y el guion del macro, aquí
+          # habría líneas en blanco entre fila y fila.
+          - "'| api | 3000 | activo |\n| db | 5432 | PARADO |' in informe"
+        success_msg: "Tabla agrupada, ordenada por puerto y sin huecos entre filas"
+      vars:
+        informe: "{{ lookup('file', carpeta_informes + '/servicios_lab.md') }}"
+
+    - name: Resumen de la lección
+      ansible.builtin.debug:
+        msg:
+          - "selectattr/rejectattr/groupby/items2dict ... transformar datos SIN bucles de tareas"
+          - "default('x') ................ solo si la variable NO existe; falsy necesita default('x', true)"
+          - "macro ....................... la fila se define una vez, se llama N veces"
+          - "trim_blocks + lstrip_blocks + '-}}' ... sin ellos, las tablas salen con huecos"
+          - "lookup('template') .......... el render del módulo template, en una variable"
