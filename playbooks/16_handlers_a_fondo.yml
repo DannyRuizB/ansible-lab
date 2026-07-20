@@ -1,0 +1,249 @@
+---
+# =============================================================================
+# Playbook 16 — Handlers a fondo: dedupe, orden, listen, flush y force
+#
+# Los handlers aparecen en el playbook 3 como "notifica y reinicia al
+# final". Este playbook enseña la letra pequeña que muerde en producción:
+#
+#   - Dedupe .............. N notify al mismo handler = UNA ejecución al
+#       final de la play (para eso existen: 10 cambios, 1 reinicio).
+#
+#   - Orden ............... los handlers corren en el ORDEN EN QUE ESTÁN
+#       DEFINIDOS, no en el orden en que se les notificó. Si el reinicio
+#       debe ir después de recargar la config, ordénalos en el fichero.
+#
+#   - listen .............. varios handlers suscritos a un mismo "tema";
+#       la tarea notifica el tema sin saber cuántos escuchan (desacopla:
+#       añadir un handler nuevo no toca ninguna tarea).
+#
+#   - meta: flush_handlers  ejecuta los pendientes A MITAD de play. El
+#       caso clásico: reiniciar el servicio ANTES del smoke test que
+#       viene después en la misma play.
+#
+#   - force_handlers ...... por defecto un fallo se lleva por delante los
+#       handlers pendientes (config cambiada, reinicio que nunca llega).
+#       Con force_handlers: true (o --force-handlers) corren igualmente.
+#       Como exige un fallo real, se demuestra invocando el playbook
+#       auxiliar 16_demo_fallo_handlers.yml dos veces y comparando.
+#
+#   - Y el contrato de siempre: notify solo dispara si la tarea acaba
+#       CHANGED — por eso entre rondas de la demo se borra la config.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/16_handlers_a_fondo.yml
+#
+# (No es idempotente a propósito: los logs de orden son append y la demo
+#  de fallo limpia y repite; la verificación son sus asserts.)
+# =============================================================================
+
+- name: Preparar el terreno (carpeta limpia)
+  hosts: laboratorio
+  gather_facts: false
+
+  tasks:
+    - name: Retirar restos de ejecuciones anteriores
+      ansible.builtin.file:
+        path: /tmp/ansible-lab-16
+        state: absent
+
+    - name: Crear la carpeta de trabajo
+      ansible.builtin.file:
+        path: /tmp/ansible-lab-16
+        state: directory
+        mode: "0755"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Play 1 — dedupe y orden de definición.
+# Se notifica DOS→UNO (y DOS otra vez), pero el log sale "uno, dos":
+# una línea por handler (dedupe) y en el orden del fichero (definición).
+# ─────────────────────────────────────────────────────────────────────────────
+- name: Dedupe y orden de definición
+  hosts: laboratorio
+  gather_facts: false
+
+  tasks:
+    - name: Primer cambio (notifica DOS y luego UNO, en ese orden)
+      ansible.builtin.copy:
+        dest: /tmp/ansible-lab-16/cambio_a.txt
+        content: "cambio a\n"
+        mode: "0644"
+      notify:
+        - Anotar handler DOS
+        - Anotar handler UNO
+
+    - name: Segundo cambio (vuelve a notificar DOS)
+      ansible.builtin.copy:
+        dest: /tmp/ansible-lab-16/cambio_b.txt
+        content: "cambio b\n"
+        mode: "0644"
+      notify: Anotar handler DOS
+
+  handlers:
+    # Definidos UNO antes que DOS a propósito: ese es el orden que manda.
+    - name: Anotar handler UNO
+      ansible.builtin.lineinfile:
+        path: /tmp/ansible-lab-16/orden.log
+        line: uno
+        create: true
+        mode: "0644"
+
+    - name: Anotar handler DOS
+      ansible.builtin.lineinfile:
+        path: /tmp/ansible-lab-16/orden.log
+        line: dos
+        create: true
+        mode: "0644"
+
+- name: Verificar dedupe y orden (los handlers corrieron al cerrar la play anterior)
+  hosts: laboratorio
+  gather_facts: false
+
+  tasks:
+    - name: Leer el log de orden
+      ansible.builtin.slurp:
+        src: /tmp/ansible-lab-16/orden.log
+      register: log_orden
+
+    - name: El log tiene exactamente "uno, dos" — dedupe y orden de definición
+      ansible.builtin.assert:
+        that:
+          - (log_orden.content | b64decode).splitlines() == ['uno', 'dos']
+        success_msg: >-
+          DOS se notificó dos veces y corrió una; UNO se notificó el último
+          y corrió el primero (orden de definición, no de notify).
+        fail_msg: "Log inesperado: {{ log_orden.content | b64decode }}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Play 2 — listen + meta: flush_handlers.
+# Un solo notify al tema "recargar stack" dispara dos handlers suscritos,
+# y flush_handlers los ejecuta A MITAD de play para poder verificar (el
+# smoke test) en la MISMA play.
+# ─────────────────────────────────────────────────────────────────────────────
+- name: Listen y flush_handlers
+  hosts: laboratorio
+  gather_facts: false
+
+  tasks:
+    - name: Cambiar la config del stack (notifica el TEMA, no un handler concreto)
+      ansible.builtin.copy:
+        dest: /tmp/ansible-lab-16/stack.conf
+        content: "workers: 4\n"
+        mode: "0644"
+      notify: recargar stack
+
+    - name: Antes del flush los handlers siguen pendientes
+      ansible.builtin.stat:
+        path: /tmp/ansible-lab-16/web_reiniciada.txt
+      register: web_antes
+
+    - name: Comprobar que aún no ha corrido nada
+      ansible.builtin.assert:
+        that:
+          - not web_antes.stat.exists
+        success_msg: Notificado pero pendiente — los handlers esperan al final de la play.
+        fail_msg: El handler corrió antes del flush — eso no debería pasar.
+
+    - name: Ejecutar YA los handlers pendientes
+      ansible.builtin.meta: flush_handlers
+
+    - name: Después del flush, mirar las dos marcas
+      ansible.builtin.stat:
+        path: "/tmp/ansible-lab-16/{{ item }}"
+      loop:
+        - web_reiniciada.txt
+        - db_reiniciada.txt
+      register: marcas
+
+    - name: Los DOS suscriptores corrieron, a mitad de play (smoke test posible)
+      ansible.builtin.assert:
+        that:
+          - marcas.results | map(attribute='stat.exists') | list == [true, true]
+        success_msg: Un notify al tema, dos handlers por listen, ejecutados por flush_handlers.
+        fail_msg: "Faltan marcas: {{ marcas.results | map(attribute='stat.exists') | list }}"
+
+  handlers:
+    - name: Reiniciar la web simulada
+      listen: recargar stack
+      ansible.builtin.copy:
+        dest: /tmp/ansible-lab-16/web_reiniciada.txt
+        content: "web reiniciada\n"
+        mode: "0644"
+
+    - name: Reiniciar la db simulada
+      listen: recargar stack
+      ansible.builtin.copy:
+        dest: /tmp/ansible-lab-16/db_reiniciada.txt
+        content: "db reiniciada\n"
+        mode: "0644"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Play 3 — force_handlers, con un fallo de verdad.
+# El auxiliar 16_demo_fallo_handlers.yml cambia la config, notifica el
+# "reinicio" y revienta. Sin --force-handlers el reinicio muere con la
+# play; con él, corre igualmente. Las dos rondas deben acabar en fallo
+# (failed_when: rc == 0): lo que cambia es si queda la marca del handler.
+# ─────────────────────────────────────────────────────────────────────────────
+- name: Force handlers (el fallo que se lleva el reinicio por delante)
+  hosts: laboratorio
+  gather_facts: false
+
+  vars:
+    raiz_repo: "{{ playbook_dir }}/.."
+
+  tasks:
+    - name: "Ronda 1 — sin force: el playbook auxiliar debe FALLAR"
+      ansible.builtin.command:
+        cmd: ansible-playbook playbooks/16_demo_fallo_handlers.yml
+        chdir: "{{ raiz_repo }}"
+      register: ronda_sin_force
+      failed_when: ronda_sin_force.rc == 0
+      changed_when: false
+
+    - name: Mirar si el handler dejó marca
+      ansible.builtin.stat:
+        path: /tmp/ansible-lab-16/reinicio_hecho.txt
+      register: marca_sin_force
+
+    - name: "Sin force NO hay marca: el fallo se llevó el handler pendiente"
+      ansible.builtin.assert:
+        that:
+          - not marca_sin_force.stat.exists
+        success_msg: Config cambiada y reinicio perdido — el desastre por defecto.
+        fail_msg: El handler corrió sin force_handlers — inesperado.
+
+    - name: Limpiar la config para que la ronda 2 vuelva a ser CHANGED
+      ansible.builtin.file:
+        path: "/tmp/ansible-lab-16/{{ item }}"
+        state: absent
+      loop:
+        - config_demo.txt
+        - reinicio_hecho.txt
+
+    - name: "Ronda 2 — con --force-handlers: debe FALLAR igualmente"
+      ansible.builtin.command:
+        cmd: ansible-playbook --force-handlers playbooks/16_demo_fallo_handlers.yml
+        chdir: "{{ raiz_repo }}"
+      register: ronda_con_force
+      failed_when: ronda_con_force.rc == 0
+      changed_when: false
+
+    - name: Mirar de nuevo la marca
+      ansible.builtin.stat:
+        path: /tmp/ansible-lab-16/reinicio_hecho.txt
+      register: marca_con_force
+
+    - name: "Con force SÍ hay marca: el handler corrió pese al fallo"
+      ansible.builtin.assert:
+        that:
+          - marca_con_force.stat.exists
+        success_msg: >-
+          Misma play, mismo fallo: force_handlers ejecutó el reinicio
+          pendiente antes de rendirse. En una play con servicios de
+          verdad, force_handlers: true evita config aplicada a medias.
+        fail_msg: No hay marca — --force-handlers no ejecutó el handler.
+
+    - name: Resumen de la demo
+      ansible.builtin.debug:
+        msg: >-
+          Ambas rondas fallaron como debían (rc {{ ronda_sin_force.rc }} y
+          {{ ronda_con_force.rc }}); la diferencia fue el handler.

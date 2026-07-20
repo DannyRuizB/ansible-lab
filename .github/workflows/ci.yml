@@ -149,6 +149,12 @@ jobs:
           echo "$salida" | tail -3
           echo "$salida" | grep -q "changed=0" || { echo "::error::El playbook no es idempotente"; exit 1; }
 
+      # El 16 no lleva pasada de idempotencia: sus logs de orden son append y
+      # la demo de force_handlers limpia y repite — la verificación son sus
+      # asserts (dedupe, orden, listen, flush y las dos rondas de fallo).
+      - name: "Playbook 16 — handlers a fondo (asserts incluidos)"
+        run: ansible-playbook playbooks/16_handlers_a_fondo.yml
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \
