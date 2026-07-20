@@ -7,7 +7,7 @@
 
 Laboratorio de aprendizaje de **Ansible** que funciona **100% en local**, en dos niveles:
 
-- **Playbooks 1-6, 8-12 y 15**: el "servidor" gestionado es la propia máquina (`localhost` con `ansible_connection=local`). Sin SSH, sin servidores remotos, sin permisos de administrador — todo ocurre dentro del directorio del proyecto.
+- **Playbooks 1-6, 8-12, 15 y 16**: el "servidor" gestionado es la propia máquina (`localhost` con `ansible_connection=local`). Sin SSH, sin servidores remotos, sin permisos de administrador — todo ocurre dentro del directorio del proyecto.
 - **Playbooks 7, 13 y 14 (opcionales)**: una "flota" de 3 contenedores Docker locales gestionados **por SSH real**, para practicar inventarios multi-host, estrategias de ejecución y delegación. Requiere Docker, pero sigue siendo local: los contenedores solo escuchan en `127.0.0.1`.
 
 Forma parte de mi formación en automatización/DevOps con perfil de administración de sistemas (ASIR).
@@ -35,6 +35,7 @@ Forma parte de mi formación en automatización/DevOps con perfil de administrac
 | `playbooks/13_estrategias_ejecucion.yml` | **Estrategias de ejecución** (sobre la flota) — **linear** (barrera por tarea: el host lento marca el paso de todos), **free** (cada host a su ritmo: los rápidos no esperan) y **throttle** (embudo por TAREA — de N en N aunque la play sea free; `serial` trocea la PLAY, visto en el 7). Demostrado con sellos de tiempo y `assert`: la barrera de linear se cumple, en free un web termina todo antes de que db1 acabe su primera tarea, y en el embudo nadie entra hasta que sale el anterior. Incluye la trampa de medición cazada al escribirlo: con free, un `set_fact` posterior mide cuándo el scheduler procesó el resultado (llegan a rachas), no cuándo corrió la tarea — los sellos van dentro del comando, con el reloj remoto |
 | `playbooks/14_delegacion_y_run_once.yml` | **Delegación y run_once** (sobre la flota) — quién ejecuta y de quién son los datos: **delegate_to** (la tarea corre en otro nodo, el `register` es del que delega), **delegate_facts** con su trampa demostrada (un `setup` delegado SIN ella machaca los facts propios: web1 pasa a creerse db1) y **run_once** con la letra pequeña de `serial`: es una vez por play... pero una vez POR TANDA si hay serial (3 tandas = 3 "anuncios"; demostrado contando ejecuciones en ficheros del controlador). El "una vez de verdad" bajo serial: `when: inventory_hostname == groups['flota'][0]` |
 | `playbooks/15_plantillas_jinja_avanzadas.yml` | **Jinja avanzado** — la mitad de Ansible es Jinja: **filtros encadenados** (`selectattr`/`rejectattr`/`groupby`/`items2dict` — transformar listas de dicts sin bucles de tareas), **la trampa de `default()`** (una cadena vacía ES un valor y no se rellena; lo falsy necesita `default(x, true)`), **macros** (la fila de la tabla se define una vez), **control de espacios** (`#jinja2: trim_blocks/lstrip_blocks` + el guion de `{{ ... -}}` — sin ellos las tablas Markdown salen con huecos) y **`lookup('template')`** (el mismo render del módulo, a una variable — verificado byte a byte contra el fichero escrito). Todo con `assert` |
+| `playbooks/16_handlers_a_fondo.yml` | **Handlers a fondo** — la letra pequeña de `notify`: **dedupe** (N notify = 1 ejecución), **orden de definición** (corren en el orden del fichero, no del notify — demostrado notificando al revés), **`listen`** (varios handlers suscritos a un tema: la tarea no sabe cuántos escuchan), **`meta: flush_handlers`** (ejecutarlos A MITAD de play — el smoke test tras el reinicio, en la misma play) y **`force_handlers`** con un fallo de verdad: el auxiliar `16_demo_fallo_handlers.yml` cambia config, notifica y revienta — sin `--force-handlers` el reinicio muere con la play (config aplicada a medias), con él corre igualmente. Todo verificado con `assert` |
 
 ## 📁 Estructura
 
@@ -67,6 +68,8 @@ ansible-lab/
 │   ├── 13_estrategias_ejecucion.yml
 │   ├── 14_delegacion_y_run_once.yml
 │   ├── 15_plantillas_jinja_avanzadas.yml
+│   ├── 16_handlers_a_fondo.yml
+│   ├── 16_demo_fallo_handlers.yml       # auxiliar del 16: fallo a propósito
 │   └── tasks/                           # ficheros de tareas del playbook 12
 ├── vars/
 │   └── secretos.yml                     # secretos CIFRADOS con ansible-vault

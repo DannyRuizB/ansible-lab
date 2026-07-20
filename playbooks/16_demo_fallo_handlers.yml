@@ -1,0 +1,36 @@
+---
+# =============================================================================
+# Demo auxiliar del playbook 16 — NO ejecutar suelto (lo invoca el 16).
+#
+# Guion mínimo del desastre clásico: una tarea cambia la "config" y notifica
+# un handler (el reinicio), y la tarea siguiente revienta. Por defecto los
+# handlers pendientes MUEREN con la play: el reinicio nunca ocurre y el
+# servicio se queda con la config nueva sin aplicar. El playbook 16 ejecuta
+# este fichero dos veces (sin y con --force-handlers) y comprueba en cuál
+# de las dos el handler llegó a dejar su marca.
+# =============================================================================
+
+- name: Fallo con handler pendiente (comparar con y sin --force-handlers)
+  hosts: laboratorio
+  gather_facts: false
+
+  tasks:
+    - name: Cambiar la config simulada (notifica el reinicio)
+      ansible.builtin.copy:
+        dest: /tmp/ansible-lab-16/config_demo.txt
+        content: "version: nueva\n"
+        mode: "0644"
+      notify: Dejar constancia del reinicio
+
+    - name: Fallo a propósito antes de que el handler corra
+      ansible.builtin.fail:
+        msg: >-
+          El despliegue revienta con el reinicio aún pendiente.
+          ¿Corre el handler? Solo con force_handlers / --force-handlers.
+
+  handlers:
+    - name: Dejar constancia del reinicio
+      ansible.builtin.copy:
+        dest: /tmp/ansible-lab-16/reinicio_hecho.txt
+        content: "el handler llego a correr\n"
+        mode: "0644"
