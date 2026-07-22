@@ -1,0 +1,313 @@
+---
+# =============================================================================
+# Playbook 17 — Errores a fondo: rescue con contexto, failed_when y loops
+#
+# El block/rescue/always aparece en el playbook 5 como "el try/catch de
+# Ansible". Este playbook enseña la letra pequeña de los fallos, que es
+# donde se decide si una automatización es de fiar:
+#
+#   - rescue con contexto ... dentro del rescue existen ansible_failed_task
+#       y ansible_failed_result: quién falló y por qué. El patrón completo:
+#       anotar el parte, REPARAR la causa y reintentar — y always deja su
+#       sello pase lo que pase.
+#
+#   - rescue vs ignore_errors  ignore_errors tapa el fallo pero la tarea
+#       queda ROJA (el recap cuenta ignored=1) y el registro dice failed.
+#       El rescue convierte el fallo en flujo controlado. Y caza cosas que
+#       no esperas: hasta una variable sin definir (el error de plantilla
+#       más común en producción).
+#
+#   - failed_when fino ...... los comandos no son binarios: para grep,
+#       rc=1 significa "no está" (dato, no error) y rc>1 sí es error real.
+#       Y al revés: una CLI que imprime ERROR y sale con rc 0 — el fallo
+#       se declara por CONTENIDO, no por código de salida.
+#
+#   - fallos en un loop ..... un ítem que revienta NO corta el loop: los
+#       ítems restantes se ejecutan y la tarea falla al final, en
+#       conjunto. El recuento fino se hace sobre register.results.
+#
+#   - rescue que falla ...... si el propio rescate revienta, el always
+#       corre IGUALMENTE y el error re-emerge hacia el block exterior
+#       (o mata la play si no hay otro). El rescate del rescate.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/17_errores_a_fondo.yml
+#
+# (No es idempotente a propósito: las demos provocan fallos y reparan;
+#  la verificación son sus asserts.)
+# =============================================================================
+
+- name: Preparar el terreno (carpeta limpia)
+  hosts: laboratorio
+  gather_facts: false
+
+  tasks:
+    - name: Retirar restos de ejecuciones anteriores
+      ansible.builtin.file:
+        path: /tmp/ansible-lab-17
+        state: absent
+
+    - name: Crear la carpeta de trabajo
+      ansible.builtin.file:
+        path: /tmp/ansible-lab-17
+        state: directory
+        mode: "0755"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Play 1 — el try/catch completo: parte del fallo, reparación y sello.
+# La config no existe la primera vez; el rescue anota QUIÉN falló y POR QUÉ
+# (ansible_failed_task / ansible_failed_result), repara la causa y reintenta.
+# El always deja su sello de auditoría con fallo o sin él.
+# ─────────────────────────────────────────────────────────────────────────────
+- name: Rescue con contexto (reparar y reintentar)
+  hosts: laboratorio
+  gather_facts: false
+
+  tasks:
+    - name: Bloque protegido de lectura de config
+      block:
+        - name: Leer la config de la app
+          ansible.builtin.slurp:
+            src: /tmp/ansible-lab-17/app.conf
+          register: intento_config
+
+      rescue:
+        - name: Anotar el parte del fallo (tarea y motivo reales)
+          ansible.builtin.copy:
+            dest: /tmp/ansible-lab-17/rescate.log
+            content: |
+              tarea: {{ ansible_failed_task.name }}
+              motivo: {{ ansible_failed_result.msg }}
+            mode: "0644"
+
+        - name: Reparar la causa — escribir la config por defecto
+          ansible.builtin.copy:
+            dest: /tmp/ansible-lab-17/app.conf
+            content: "modo: seguro\n"
+            mode: "0644"
+
+        - name: Reintentar la lectura, ya reparada
+          ansible.builtin.slurp:
+            src: /tmp/ansible-lab-17/app.conf
+          register: config_reparada
+
+      always:
+        - name: Sello de auditoría (con fallo o sin él)
+          ansible.builtin.copy:
+            dest: /tmp/ansible-lab-17/auditoria.txt
+            content: "el bloque de config terminó\n"
+            mode: "0644"
+
+    - name: El primer intento quedó registrado como fallido (el register sobrevive al rescue)
+      ansible.builtin.assert:
+        that:
+          - intento_config is failed
+        success_msg: El register del intento original conserva failed=true tras el rescate.
+        fail_msg: "intento_config no dice failed: {{ intento_config }}"
+
+    - name: El parte nombra a la tarea culpable
+      ansible.builtin.slurp:
+        src: /tmp/ansible-lab-17/rescate.log
+      register: parte
+
+    - name: Verificar parte, reparación y sello
+      ansible.builtin.assert:
+        that:
+          - "'Leer la config de la app' in (parte.content | b64decode)"
+          - "(config_reparada.content | b64decode | trim) == 'modo: seguro'"
+          - "'/tmp/ansible-lab-17/auditoria.txt' is exists"
+        success_msg: >-
+          El rescue supo quién falló y por qué, reparó la causa, el
+          reintento leyó la config y el always dejó su sello.
+        fail_msg: "Parte: {{ parte.content | b64decode }}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Play 2 — ignore_errors vs rescue.
+# ignore_errors deja pasar el fallo pero la tarea queda roja (ignored=1 en el
+# recap) y su register dice failed. Y el rescue caza hasta el error de
+# plantilla más común: la variable sin definir.
+# ─────────────────────────────────────────────────────────────────────────────
+- name: Ignore_errors contra rescue
+  hosts: laboratorio
+  gather_facts: false
+
+  tasks:
+    - name: Comando que falla con la manta puesta (ignore_errors)
+      ansible.builtin.command:
+        cmd: /bin/false
+      register: fallo_tapado
+      ignore_errors: true
+      changed_when: false
+
+    - name: La manta no engaña al register (failed=true, y el recap cuenta ignored=1)
+      ansible.builtin.assert:
+        that:
+          - fallo_tapado is failed
+          - fallo_tapado.rc == 1
+        success_msg: >-
+          La play siguió, pero la tarea queda roja y registrada como
+          fallida — ignore_errors tapa, no arregla.
+        fail_msg: "fallo_tapado inesperado: rc={{ fallo_tapado.rc | default('?') }}"
+
+    - name: Bloque que usa una variable inexistente
+      block:
+        - name: Usar una variable que nadie definió
+          ansible.builtin.debug:
+            msg: "{{ variable_que_no_existe }}"
+
+      rescue:
+        - name: Guardar el motivo que trae ansible_failed_result
+          ansible.builtin.set_fact:
+            motivo_undef: "{{ ansible_failed_result.msg }}"
+
+    - name: El rescue cazó el error de plantilla y el motivo nombra a la variable
+      ansible.builtin.assert:
+        that:
+          - "'variable_que_no_existe' in motivo_undef"
+        success_msg: >-
+          Una variable sin definir no es un fallo de comando — y aun así
+          el rescue la caza, con el nombre de la variable en el motivo.
+        fail_msg: "Motivo inesperado: {{ motivo_undef }}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Play 3 — failed_when de precisión.
+# grep devuelve rc=1 cuando el patrón no está: eso es un DATO, no un error
+# (error real es rc>1). Y la CLI mentirosa: imprime ERROR y sale con rc 0 —
+# el fallo se declara por contenido de stdout.
+# ─────────────────────────────────────────────────────────────────────────────
+- name: Failed_when fino (los comandos no son binarios)
+  hosts: laboratorio
+  gather_facts: false
+
+  tasks:
+    - name: Buscar un patrón que no está (rc=1 no es un error)
+      ansible.builtin.command:
+        cmd: grep -c critico /tmp/ansible-lab-17/app.conf
+      register: busqueda
+      failed_when: busqueda.rc > 1
+      changed_when: false
+
+    - name: La búsqueda "falló" con rc=1 y la tarea quedó verde
+      ansible.builtin.assert:
+        that:
+          - busqueda.rc == 1
+          - busqueda is not failed
+        success_msg: "grep sin match = rc 1 = dato ('no hay líneas críticas'), no error."
+        fail_msg: "rc inesperado: {{ busqueda.rc }}"
+
+    - name: La CLI mentirosa (imprime ERROR pero sale con rc 0)
+      ansible.builtin.command:
+        cmd: 'echo "ERROR: disco degradado"'
+      register: cli_mentirosa
+      failed_when: "'ERROR' in cli_mentirosa.stdout"
+      ignore_errors: true
+      changed_when: false
+
+    - name: El fallo se declaró por contenido, no por código de salida
+      ansible.builtin.assert:
+        that:
+          - cli_mentirosa.rc == 0
+          - cli_mentirosa is failed
+        success_msg: >-
+          rc 0 y aun así failed — failed_when decide con lo que la
+          herramienta DICE, no con lo que devuelve.
+        fail_msg: "rc={{ cli_mentirosa.rc }}, failed={{ cli_mentirosa is failed }}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Play 4 — fallos dentro de un loop.
+# El segundo ítem revienta, pero el loop NO se corta: el tercero se ejecuta
+# igualmente y la tarea falla al final, en conjunto. El recuento fino se
+# hace sobre register.results.
+# ─────────────────────────────────────────────────────────────────────────────
+- name: Un loop no se corta por un ítem caído
+  hosts: laboratorio
+  gather_facts: false
+
+  tasks:
+    - name: Dejar preparados el primer y el tercer fichero (el segundo no existe)
+      ansible.builtin.copy:
+        dest: "/tmp/ansible-lab-17/{{ item }}"
+        content: "ok\n"
+        mode: "0644"
+      loop:
+        - lote_a.txt
+        - lote_c.txt
+
+    - name: Comprobar los tres ficheros del lote (el segundo falla)
+      ansible.builtin.command:
+        cmd: "test -e /tmp/ansible-lab-17/{{ item }}"
+      loop:
+        - lote_a.txt
+        - lote_b.txt
+        - lote_c.txt
+      register: lote
+      ignore_errors: true
+      changed_when: false
+
+    - name: Los tres ítems corrieron y solo cayó el segundo
+      ansible.builtin.assert:
+        that:
+          - lote.results | length == 3
+          - lote.results | selectattr('rc', 'ne', 0) | list | length == 1
+          - lote.results[1].rc != 0
+          - lote.results[2].rc == 0
+        success_msg: >-
+          El ítem caído no arrastró al resto: el tercero se ejecutó y el
+          detalle por ítem vive en register.results.
+        fail_msg: "rc por ítem: {{ lote.results | map(attribute='rc') | list }}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Play 5 — el rescate del rescate.
+# Si el propio rescue revienta, el always corre IGUALMENTE y el error
+# re-emerge hacia el block exterior (sin uno, mataría la play).
+# ─────────────────────────────────────────────────────────────────────────────
+- name: Rescue que falla y always que corre igual
+  hosts: laboratorio
+  gather_facts: false
+
+  tasks:
+    - name: Bloque exterior (recoge el desastre del interior)
+      block:
+        - name: Bloque interior con rescate defectuoso
+          block:
+            - name: El fallo original
+              ansible.builtin.command:
+                cmd: /bin/false
+              changed_when: false
+
+          rescue:
+            - name: Un rescate que también revienta
+              ansible.builtin.command:
+                cmd: /bin/false
+              changed_when: false
+
+          always:
+            - name: La marca del always (corre aunque el rescue haya fallado)
+              ansible.builtin.copy:
+                dest: /tmp/ansible-lab-17/always_corrio.txt
+                content: "always cumplió\n"
+                mode: "0644"
+
+      rescue:
+        - name: El exterior recoge lo que el interior no supo arreglar
+          ansible.builtin.copy:
+            dest: /tmp/ansible-lab-17/rescate_exterior.txt
+            content: "el fallo del rescue re-emergió hasta aquí\n"
+            mode: "0644"
+
+    - name: Verificar las dos marcas del desastre controlado
+      ansible.builtin.assert:
+        that:
+          - "'/tmp/ansible-lab-17/always_corrio.txt' is exists"
+          - "'/tmp/ansible-lab-17/rescate_exterior.txt' is exists"
+        success_msg: >-
+          El always corrió pese al rescue caído, y el fallo re-emergió
+          al block exterior en vez de tragarse en silencio.
+        fail_msg: Falta alguna de las marcas — revisar la cadena block/rescue/always.
+
+    - name: Resumen de la lección
+      ansible.builtin.debug:
+        msg: >-
+          rescue con contexto (ansible_failed_task/result), ignore_errors
+          que tapa pero no arregla, failed_when por contenido y por rc no
+          binario, loops que no se cortan y el always que nunca falta.
