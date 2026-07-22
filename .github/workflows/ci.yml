@@ -160,6 +160,12 @@ jobs:
       - name: "Playbook 17 — errores a fondo (asserts incluidos)"
         run: ansible-playbook playbooks/17_errores_a_fondo.yml
 
+      # El 18 tampoco: genera los vaults en cada ejecución (la sal del
+      # cifrado cambia) — la verificación son sus asserts y las dos rondas
+      # anidadas (etiquetas cambiadas con y sin ANSIBLE_VAULT_ID_MATCH).
+      - name: "Playbook 18 — vault a fondo (asserts incluidos)"
+        run: ansible-playbook playbooks/18_vault_a_fondo.yml
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \

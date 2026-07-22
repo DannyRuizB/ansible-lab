@@ -1,0 +1,257 @@
+---
+# =============================================================================
+# Playbook 18 — Vault a fondo: vault-ids, encrypt_string, rekey y la trampa
+#
+# El playbook 6 enseña el caso base (un fichero cifrado + vars_files +
+# no_log). Este va a la letra pequeña con la que se tropieza en real:
+#
+#   - vault-ids múltiples .. dev y prod cifrados con CONTRASEÑAS distintas
+#       y cargados juntos en una misma ejecución (--vault-id dev@f1
+#       --vault-id prod@f2). Cada entorno con su llave.
+#
+#   - LA TRAMPA ............ las etiquetas NO se comprueban por defecto:
+#       Ansible prueba TODAS las contraseñas dadas contra cada vault, así
+#       que intercambiar las etiquetas... funciona igual. La etiqueta del
+#       header ($ANSIBLE_VAULT;1.2;AES256;dev) es una PISTA, no una
+#       cerradura. Con ANSIBLE_VAULT_ID_MATCH=True se convierte en
+#       cerradura: etiqueta que no cuadra, vault que no se abre.
+#
+#   - encrypt_string ....... un YAML en claro con UN valor cifrado dentro
+#       (!vault |) — el diff de git sigue siendo legible y solo el secreto
+#       viaja opaco. Se genera con ansible-vault encrypt_string.
+#
+#   - rekey ................ rotar la contraseña de un vault existente:
+#       la vieja deja de abrirlo, la nueva sí. Sin descifrar a disco.
+#
+#   - view vs cat .......... en el fichero solo hay AES256 + la etiqueta;
+#       ansible-vault view muestra el claro (con la contraseña correcta).
+#
+# Las demos anidadas invocan el auxiliar 18_demo_vault_ids.yml con
+# distintos --vault-id, igual que el patrón del playbook 16.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/18_vault_a_fondo.yml
+#
+# (No es idempotente a propósito: los vaults se generan en cada ejecución
+#  —la sal del cifrado cambia— y la verificación son sus asserts.)
+# =============================================================================
+
+- name: Preparar el terreno (vaults generados al vuelo)
+  hosts: laboratorio
+  gather_facts: false
+
+  vars:
+    lab: /tmp/ansible-lab-18
+
+  tasks:
+    - name: Retirar restos de ejecuciones anteriores
+      ansible.builtin.file:
+        path: "{{ lab }}"
+        state: absent
+
+    - name: Crear la carpeta de trabajo
+      ansible.builtin.file:
+        path: "{{ lab }}"
+        state: directory
+        mode: "0755"
+
+    - name: Escribir las contraseñas de cada entorno (esto es un lab — en real, JAMÁS a disco en claro)
+      ansible.builtin.copy:
+        dest: "{{ lab }}/{{ item.fichero }}"
+        content: "{{ item.clave }}\n"
+        mode: "0600"
+      loop:
+        - { fichero: pass_dev.txt, clave: clave-dev-2026 }
+        - { fichero: pass_prod.txt, clave: clave-prod-2026 }
+        - { fichero: pass_nueva.txt, clave: clave-rotada-2026 }
+      loop_control:
+        label: "{{ item.fichero }}"
+
+    - name: Escribir los secretos en claro (punto de partida)
+      ansible.builtin.copy:
+        dest: "{{ lab }}/vault_{{ item.entorno }}.yml"
+        content: "token_{{ item.entorno }}: {{ item.valor }}\n"
+        mode: "0600"
+      loop:
+        - { entorno: dev, valor: token-dev-42 }
+        - { entorno: prod, valor: token-prod-99 }
+      loop_control:
+        label: "vault_{{ item.entorno }}.yml"
+
+    - name: Cifrar cada vault con SU contraseña y SU etiqueta
+      ansible.builtin.command:
+        cmd: "ansible-vault encrypt --vault-id {{ item }}@{{ lab }}/pass_{{ item }}.txt {{ lab }}/vault_{{ item }}.yml"
+      loop: [dev, prod]
+      changed_when: true
+
+    - name: Generar un valor encrypt_string (cifrado con la llave dev)
+      ansible.builtin.command:
+        cmd: >-
+          ansible-vault encrypt_string --vault-id dev@{{ lab }}/pass_dev.txt
+          cadena-inline-7 --name secreto_inline
+      register: inline_cifrado
+      changed_when: false
+
+    - name: Componer el YAML mixto (claro por fuera, un secreto opaco dentro)
+      ansible.builtin.copy:
+        dest: "{{ lab }}/mixto.yml"
+        content: |
+          entorno: laboratorio
+          {{ inline_cifrado.stdout }}
+        mode: "0600"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Play 1 — dos vaults, dos llaves, una ejecución.
+# El auxiliar carga dev + prod + mixto; solo abre si AMBAS contraseñas
+# llegan con --vault-id. Sus asserts internos verifican los tres valores.
+# ─────────────────────────────────────────────────────────────────────────────
+- name: Vault-ids múltiples (dev y prod juntos)
+  hosts: laboratorio
+  gather_facts: false
+
+  vars:
+    lab: /tmp/ansible-lab-18
+    raiz_repo: "{{ playbook_dir }}/.."
+
+  tasks:
+    - name: Ejecutar el auxiliar con las dos llaves etiquetadas
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook playbooks/18_demo_vault_ids.yml
+          --vault-id dev@{{ lab }}/pass_dev.txt
+          --vault-id prod@{{ lab }}/pass_prod.txt
+        chdir: "{{ raiz_repo }}"
+      changed_when: false
+
+    - name: El auxiliar dejó su marca (los tres secretos llegaron descifrados)
+      ansible.builtin.assert:
+        that:
+          - "'/tmp/ansible-lab-18/marca_ok.txt' is exists"
+        success_msg: dev y prod abiertos cada uno con su llave, y el inline también.
+        fail_msg: Falta la marca del auxiliar.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Play 2 — la trampa de las etiquetas.
+# Con las etiquetas INTERCAMBIADAS sigue funcionando (por defecto Ansible
+# prueba todas las contraseñas contra cada vault)... hasta que
+# ANSIBLE_VAULT_ID_MATCH convierte la etiqueta en cerradura.
+# ─────────────────────────────────────────────────────────────────────────────
+- name: La etiqueta es una pista, no una cerradura (salvo que lo pidas)
+  hosts: laboratorio
+  gather_facts: false
+
+  vars:
+    lab: /tmp/ansible-lab-18
+    raiz_repo: "{{ playbook_dir }}/.."
+
+  tasks:
+    - name: Con las etiquetas cambiadas de sitio TAMBIÉN abre (default permisivo)
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook playbooks/18_demo_vault_ids.yml
+          --vault-id prod@{{ lab }}/pass_dev.txt
+          --vault-id dev@{{ lab }}/pass_prod.txt
+        chdir: "{{ raiz_repo }}"
+      changed_when: false
+
+    - name: "Con ANSIBLE_VAULT_ID_MATCH la misma orden debe FALLAR"
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook playbooks/18_demo_vault_ids.yml
+          --vault-id prod@{{ lab }}/pass_dev.txt
+          --vault-id dev@{{ lab }}/pass_prod.txt
+        chdir: "{{ raiz_repo }}"
+      environment:
+        ANSIBLE_VAULT_ID_MATCH: "True"
+      register: con_match
+      failed_when: con_match.rc == 0
+      changed_when: false
+
+    - name: Resumen de la trampa
+      ansible.builtin.debug:
+        msg: >-
+          Etiquetas intercambiadas: rc 0 por defecto (prueba todas las
+          llaves), rc {{ con_match.rc }} con vault_id_match (la etiqueta
+          pasa a ser cerradura). La etiqueta del header no protege nada
+          por sí sola.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Play 3 — rekey: rotar la contraseña sin descifrar a disco.
+# ─────────────────────────────────────────────────────────────────────────────
+- name: Rotar la contraseña de un vault (rekey)
+  hosts: laboratorio
+  gather_facts: false
+
+  vars:
+    lab: /tmp/ansible-lab-18
+
+  tasks:
+    - name: Copia de trabajo para la rotación
+      ansible.builtin.copy:
+        src: "{{ lab }}/vault_dev.yml"
+        dest: "{{ lab }}/rotado.yml"
+        remote_src: true
+        mode: "0600"
+
+    - name: Rekey — de la llave dev a la llave nueva
+      ansible.builtin.command:
+        cmd: >-
+          ansible-vault rekey --vault-id dev@{{ lab }}/pass_dev.txt
+          --new-vault-id dev@{{ lab }}/pass_nueva.txt {{ lab }}/rotado.yml
+      changed_when: true
+
+    - name: La contraseña vieja ya NO abre el vault rotado
+      ansible.builtin.command:
+        cmd: "ansible-vault view --vault-id dev@{{ lab }}/pass_dev.txt {{ lab }}/rotado.yml"
+      register: vieja
+      failed_when: vieja.rc == 0
+      changed_when: false
+
+    - name: La nueva sí, y el contenido sigue intacto
+      ansible.builtin.command:
+        cmd: "ansible-vault view --vault-id dev@{{ lab }}/pass_nueva.txt {{ lab }}/rotado.yml"
+      register: nueva
+      changed_when: false
+
+    - name: Verificar la rotación
+      ansible.builtin.assert:
+        that:
+          - "'token-dev-42' in nueva.stdout"
+        success_msg: Rotada la llave sin que el secreto haya tocado el disco en claro.
+        fail_msg: "El vault rotado no muestra el secreto esperado: {{ nueva.stdout }}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Play 4 — qué hay realmente en el fichero.
+# En disco: header con versión/cifrado/ETIQUETA (la etiqueta viaja en claro,
+# otra razón por la que no es un secreto) y el blob AES256. Nada legible.
+# ─────────────────────────────────────────────────────────────────────────────
+- name: Qué se sube a Git cuando subes un vault
+  hosts: laboratorio
+  gather_facts: false
+
+  vars:
+    lab: /tmp/ansible-lab-18
+
+  tasks:
+    - name: Leer el vault tal cual está en disco
+      ansible.builtin.slurp:
+        src: "{{ lab }}/vault_dev.yml"
+      register: crudo
+
+    - name: "En disco: header 1.2 con etiqueta dev y ni rastro del secreto"
+      ansible.builtin.assert:
+        that:
+          - (crudo.content | b64decode) is search('^\$ANSIBLE_VAULT;1\.2;AES256;dev')
+          - "'token-dev-42' not in (crudo.content | b64decode)"
+        success_msg: >-
+          El fichero enseña versión, cifrado y etiqueta (pista pública) —
+          el secreto solo existe tras ansible-vault view con la llave.
+        fail_msg: El contenido en disco no tiene la pinta esperada.
+
+    - name: Resumen de la lección
+      ansible.builtin.debug:
+        msg: >-
+          vault-ids por entorno, etiquetas que solo cierran con
+          vault_id_match, encrypt_string para YAMLs con diff legible,
+          rekey para rotar llaves y un fichero en disco que solo
+          enseña el header.
