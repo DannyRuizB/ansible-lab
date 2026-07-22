@@ -1,0 +1,29 @@
+---
+# Auxiliar del playbook 18 — se invoca ANIDADO con distintos --vault-id
+# (mismo patrón que 16_demo_fallo_handlers.yml). No ejecutarlo suelto:
+# necesita los vaults de /tmp/ansible-lab-18 y sus llaves en los flags.
+- name: Consumir dos vaults etiquetados y un valor encrypt_string
+  hosts: laboratorio
+  gather_facts: false
+
+  vars_files:
+    - /tmp/ansible-lab-18/vault_dev.yml
+    - /tmp/ansible-lab-18/vault_prod.yml
+    - /tmp/ansible-lab-18/mixto.yml
+
+  tasks:
+    - name: Los tres secretos llegan descifrados en una sola ejecución
+      ansible.builtin.assert:
+        that:
+          - token_dev == 'token-dev-42'
+          - token_prod == 'token-prod-99'
+          - secreto_inline == 'cadena-inline-7'
+          - entorno == 'laboratorio'
+        success_msg: dev con su llave, prod con la suya, y el inline dentro del YAML claro.
+        fail_msg: Algún vault no se descifró como debía.
+
+    - name: Dejar la marca de éxito (sin secretos dentro)
+      ansible.builtin.copy:
+        dest: /tmp/ansible-lab-18/marca_ok.txt
+        content: "los tres vaults abrieron\n"
+        mode: "0644"
