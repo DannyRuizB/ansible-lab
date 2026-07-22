@@ -8,3 +8,7 @@ entorno-prueba/
 
 # Clave SSH y known_hosts del laboratorio multi-host (los genera flota.sh)
 .ssh_lab/
+
+# Python bytecode (los plugins generan __pycache__ al ejecutarse)
+__pycache__/
+*.pyc
