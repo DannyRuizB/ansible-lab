@@ -166,6 +166,12 @@ jobs:
       - name: "Playbook 18 — vault a fondo (asserts incluidos)"
         run: ansible-playbook playbooks/18_vault_a_fondo.yml
 
+      # El 19 no toca disco (solo evalúa filtros Python custom y hace
+      # asserts) — idempotente por construcción, la verificación son sus
+      # asserts byte a byte.
+      - name: "Playbook 19 — filtros a medida (asserts incluidos)"
+        run: ansible-playbook playbooks/19_filtros_a_medida.yml
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \

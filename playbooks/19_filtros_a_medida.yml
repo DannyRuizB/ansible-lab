@@ -1,0 +1,109 @@
+---
+# =============================================================================
+# Playbook 19 — Extender Ansible con Python: filtros Jinja a medida
+#
+# El playbook 15 exprime los filtros NATIVOS de Jinja (selectattr, groupby,
+# map, items2dict...). Este da el paso siguiente: cuando ninguno encaja, se
+# escribe uno en Python en vez de contorsionar un one-liner ilegible.
+#
+#   - filter_plugins/ ..... un módulo Python con una clase FilterModule cuyo
+#       método filters() devuelve {nombre: función}. Ansible lo autodescubre
+#       por la ruta `filter_plugins` (fijada en ansible.cfg) y a partir de
+#       ahí los nombres se usan EXACTAMENTE como los built-in.
+#
+#   - Los tres del lab (en filter_plugins/lab_filters.py):
+#       to_snake ......... CamelCase / kebab / "con espacios" -> snake_case
+#       redact_secrets ... enmascara un secreto dejando los primeros N chars
+#       human_bytes ...... 1536 -> "1.5 KiB" (o KB con binary=false)
+#
+#   - Se encadenan con los nativos (map('to_snake'), sort) sin distinción, y
+#       funcionan igual dentro de una plantilla (lookup('template')).
+#
+# La verificación son sus asserts (byte a byte contra el render esperado).
+#
+# Ejecutar:
+#   ansible-playbook playbooks/19_filtros_a_medida.yml
+#
+# (Idempotente por construcción: solo evalúa filtros y hace asserts, no
+#  escribe nada en disco.)
+# =============================================================================
+
+- name: Filtros Jinja a medida (Python)
+  hosts: laboratorio
+  gather_facts: false
+
+  vars:
+    servicios:
+      - { nombre: MiServicioWeb, tamano: 1536, clave: hunter2secreto }
+      - { nombre: api-gateway-01, tamano: 1073741824, clave: sk }
+      - { nombre: "Cola De Mensajes", tamano: 512, clave: "" }
+
+  tasks:
+    # ── to_snake ──────────────────────────────────────────────────────────
+    - name: El filtro to_snake normaliza cualquier estilo a snake_case
+      ansible.builtin.assert:
+        that:
+          - "('MiServicioWeb' | to_snake) == 'mi_servicio_web'"
+          - "('api-gateway-01' | to_snake) == 'api_gateway_01'"
+          - "('Cola De Mensajes' | to_snake) == 'cola_de_mensajes'"
+          - "('ya_en_snake' | to_snake) == 'ya_en_snake'"
+        success_msg: to_snake maneja camelCase, guiones y espacios, y es idempotente.
+        fail_msg: to_snake no normalizó como se esperaba.
+
+    # ── redact_secrets ────────────────────────────────────────────────────
+    - name: El filtro redact_secrets deja ver solo el prefijo
+      ansible.builtin.assert:
+        that:
+          # 'hunter2secreto' (14 chars), keep=2 -> 'hu' + 12 asteriscos
+          - "('hunter2secreto' | redact_secrets) == 'hu************'"
+          # keep explícito
+          - "('hunter2secreto' | redact_secrets(4)) == 'hunt**********'"
+          # más corto que keep -> enmascarado entero (no se filtra nada)
+          - "('sk' | redact_secrets) == '**'"
+          - "('' | redact_secrets) == ''"
+        success_msg: redact_secrets nunca filtra un secreto más corto que el prefijo.
+        fail_msg: redact_secrets se comportó de forma inesperada.
+
+    # ── human_bytes ───────────────────────────────────────────────────────
+    - name: El filtro human_bytes formatea tamaños legibles
+      ansible.builtin.assert:
+        that:
+          - "(512 | human_bytes) == '512 B'"
+          - "(1536 | human_bytes) == '1.5 KiB'"
+          - "(1073741824 | human_bytes) == '1.0 GiB'"
+          # binary=false salta a base 1000
+          - "(1500 | human_bytes(false)) == '1.5 KB'"
+        success_msg: human_bytes cubre bytes enteros y unidades binarias/decimales.
+        fail_msg: human_bytes formateó mal algún tamaño.
+
+    # ── encadenado con filtros nativos ────────────────────────────────────
+    - name: Los custom se encadenan con los built-in (map + sort)
+      ansible.builtin.assert:
+        that:
+          - >-
+            (servicios | map(attribute='nombre') | map('to_snake') | sort | list)
+            == ['api_gateway_01', 'cola_de_mensajes', 'mi_servicio_web']
+        success_msg: map('to_snake') se comporta como cualquier filtro nativo.
+        fail_msg: El encadenado con filtros nativos falló.
+
+    # ── uso dentro de una plantilla ───────────────────────────────────────
+    - name: Y funcionan igual en una plantilla (lookup template, sin tocar disco)
+      ansible.builtin.assert:
+        that:
+          - "(render.split('\n'))[0] == '# Inventario de servicios'"
+          # Ordenado por nombre: api-gateway-01 primero, con su GiB y clave 'sk' toda tapada
+          - "'**api_gateway_01** — 1.0 GiB, clave `**`' in render"
+          # El secreto largo sale enmascarado (nunca en claro)
+          - "'clave `hu************`' in render"
+          - "'hunter2secreto' not in render"
+        success_msg: Los filtros a medida renderizan en plantillas como los nativos.
+        fail_msg: "Render inesperado:\n{{ render }}"
+      vars:
+        render: "{{ lookup('template', playbook_dir + '/../templates/inventario_filtros.md.j2') }}"
+
+    - name: Resumen de la lección
+      ansible.builtin.debug:
+        msg: >-
+          filter_plugins/ + FilterModule.filters() = filtros Python propios
+          (to_snake, redact_secrets, human_bytes) usables como los nativos,
+          encadenables con map/sort y válidos dentro de plantillas.

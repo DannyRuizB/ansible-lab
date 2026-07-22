@@ -1,0 +1,7 @@
+{#- Playbook 19 — plantilla que usa los filtros Python a medida. Encadenados
+    con los nativos (map, sort) igual que cualquier filtro built-in. -#}
+# Inventario de servicios
+
+{% for svc in servicios | sort(attribute='nombre') %}
+- **{{ svc.nombre | to_snake }}** — {{ svc.tamano | human_bytes }}, clave `{{ svc.clave | redact_secrets }}`
+{% endfor %}
