@@ -155,6 +155,11 @@ jobs:
       - name: "Playbook 16 — handlers a fondo (asserts incluidos)"
         run: ansible-playbook playbooks/16_handlers_a_fondo.yml
 
+      # El 17 tampoco: provoca fallos a propósito (rescues, ignore_errors,
+      # loops con víctima) y repara — la verificación son sus asserts.
+      - name: "Playbook 17 — errores a fondo (asserts incluidos)"
+        run: ansible-playbook playbooks/17_errores_a_fondo.yml
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \
