@@ -236,6 +236,13 @@ jobs:
       - name: "Playbook 14 — delegación y run_once (asserts incluidos)"
         run: ansible-playbook -i inventario_flota.ini playbooks/14_delegacion_y_run_once.yml
 
+      # La play 1 valida el contrato del script (--list, _meta, --host) desde
+      # fuera y la play 2 se conecta por SSH real a lo que el script descubrió
+      # en Docker: si el inventario dinámico inventara hosts o puertos, el
+      # propio playbook falla.
+      - name: "Playbook 20 — inventario dinámico (asserts incluidos)"
+        run: ansible-playbook -i inventario_dinamico.py playbooks/20_inventario_dinamico.yml
+
       - name: Apagar la flota
         if: always()
         run: ./flota.sh down

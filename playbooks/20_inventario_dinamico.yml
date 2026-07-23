@@ -1,0 +1,115 @@
+---
+# =============================================================================
+# Playbook 20 — Inventario dinámico: la flota descubierta, no apuntada
+#
+# Hasta ahora la flota vivía en inventario_flota.ini con los puertos escritos
+# a mano. Ese fichero MIENTE en cuanto la realidad cambia: un nodo más, un
+# puerto distinto, un contenedor caído... y nadie avisa. Un inventario
+# dinámico invierte la carga: se pregunta a la FUENTE DE VERDAD (aquí Docker;
+# en producción AWS/Proxmox/NetBox) en el momento de ejecutar.
+#
+#   - inventario_dinamico.py ..... script ejecutable que descubre los
+#       contenedores ansible-lab-* vivos y emite el JSON del contrato:
+#       --list (grupos + _meta.hostvars) y --host <nombre> (compatibilidad).
+#       La _meta es la letra pequeña que importa: sin ella Ansible ejecuta
+#       el script UNA VEZ MÁS POR HOST para pedir variables.
+#
+#   - Se usa igual que un INI:  -i inventario_dinamico.py
+#       (fichero ejecutable => Ansible lo ejecuta en vez de parsearlo).
+#
+# La verificación es doble: la play 1 valida el CONTRATO del script desde
+# fuera (localhost, sin SSH), y la play 2 se conecta DE VERDAD a los nodos
+# que el script descubrió — si la detección inventara hosts o puertos, el
+# ping por SSH la desmentiría.
+#
+# Requiere la flota arriba (./flota.sh up && ./flota.sh esperar).
+#
+# Ejecutar:
+#   ansible-playbook -i inventario_dinamico.py playbooks/20_inventario_dinamico.yml
+#
+# (Idempotente por construcción: descubre, se conecta y hace asserts; no
+#  escribe nada ni en el controlador ni en los nodos.)
+# =============================================================================
+
+- name: El contrato del script de inventario (visto desde fuera)
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    # ── --list: una llamada, inventario completo ──────────────────────────
+    - name: Ejecutar el script como lo haría Ansible (--list)
+      ansible.builtin.command: "{{ playbook_dir }}/../inventario_dinamico.py --list"
+      register: lista_cruda
+      changed_when: false
+
+    - name: Parsear el JSON del inventario
+      ansible.builtin.set_fact:
+        dinamico: "{{ lista_cruda.stdout | from_json }}"
+
+    - name: El JSON cumple el contrato (grupos, paraguas y _meta)
+      ansible.builtin.assert:
+        that:
+          # grupos por convención de nombres, como en el INI estático
+          - "'web' in dinamico"
+          - "'db' in dinamico"
+          - dinamico.web.hosts | length == 2
+          - dinamico.db.hosts | length == 1
+          # el paraguas 'flota' agrupa por children y carga las vars de conexión
+          - dinamico.flota.children | sort == ['db', 'web']
+          - "'ansible_user' in dinamico.flota.vars"
+          # _meta.hostvars: cada nodo descubierto trae su puerto
+          - dinamico._meta.hostvars.keys() | sort == ['db1', 'web1', 'web2']
+          - dinamico._meta.hostvars.web1.ansible_port is defined
+        success_msg: "--list devuelve grupos + _meta en una sola llamada."
+        fail_msg: El JSON de --list no cumple el contrato esperado.
+
+    # ── --host: el camino lento que _meta evita ───────────────────────────
+    - name: Pedir las variables de un host por el camino de compatibilidad
+      ansible.builtin.command: "{{ playbook_dir }}/../inventario_dinamico.py --host web1"
+      register: host_crudo
+      changed_when: false
+
+    - name: Coherencia entre --host y _meta (mismo dato por los dos caminos)
+      ansible.builtin.assert:
+        that:
+          - (host_crudo.stdout | from_json) == dinamico._meta.hostvars.web1
+        success_msg: --host web1 responde lo mismo que _meta (Ansible usará _meta).
+        fail_msg: --host y _meta discrepan — el contrato está roto.
+
+    # ── el inventario que ESTA ejecución está usando ya es el dinámico ────
+    - name: Este playbook corre con -i inventario_dinamico.py y los grupos existen
+      ansible.builtin.assert:
+        that:
+          - groups['web'] | sort == ['web1', 'web2']
+          - groups['db'] == ['db1']
+          - groups['flota'] | length == 3
+        success_msg: Los grupos del play vienen del script, no de ningún INI.
+        fail_msg: >-
+          Los grupos no coinciden — ¿se lanzó sin -i inventario_dinamico.py
+          o con la flota a medias? (./flota.sh up && ./flota.sh esperar)
+
+- name: Conectar de verdad con lo descubierto (la prueba que no miente)
+  hosts: flota
+  gather_facts: false
+
+  tasks:
+    # Si el script hubiera inventado hosts o puertos, aquí se acaba la
+    # función: el ping va por SSH real contra lo que dijo Docker.
+    - name: Ping por SSH a cada nodo descubierto
+      ansible.builtin.ping:
+
+    - name: El puerto descubierto es el que de verdad atiende este nodo
+      ansible.builtin.command: hostname
+      register: nombre_real
+      changed_when: false
+
+    - name: El contenedor al otro lado del puerto es quien el inventario dice
+      ansible.builtin.assert:
+        that:
+          - nombre_real.stdout == inventory_hostname
+        success_msg: >-
+          {{ inventory_hostname }} responde en el puerto
+          {{ ansible_port }} — descubrimiento y realidad coinciden.
+        fail_msg: >-
+          El puerto {{ ansible_port }} no lleva a {{ inventory_hostname }}
+          sino a {{ nombre_real.stdout }} — inventario y realidad discrepan.
