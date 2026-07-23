@@ -1,0 +1,40 @@
+---
+# =============================================================================
+# Capa "constructed" sobre el inventario dinámico (playbook 21).
+#
+# Un inventario puede ser una PILA de fuentes: este fichero no aporta ni un
+# solo host — decora los que ya llegaron de la fuente anterior con grupos y
+# variables DERIVADAS. Se usa apilando -i en orden (la capa va detrás de la
+# fuente que decora):
+#
+#   ansible-playbook -i inventario_dinamico.py -i inventario_construido.yml ...
+#
+# Lo carga el plugin `auto` (activado por defecto) gracias a la clave
+# `plugin:` de la primera línea — no hace falta tocar enable_plugins.
+#
+# strict: true es la letra pequeña IMPORTANTE: por defecto (false) un error
+# de plantilla en compose/groups se IGNORA en silencio — el grupo simplemente
+# no aparece y nadie avisa. El playbook 21 demuestra la diferencia.
+# =============================================================================
+plugin: constructed
+strict: true
+
+# Variables derivadas por host (Jinja sobre las vars ya existentes).
+compose:
+  # "127.0.0.1:2201" — útil para mensajes y para herramientas externas.
+  ssh_endpoint: ansible_host ~ ':' ~ ansible_port
+  # web1 -> 1, db1 -> 1, web2 -> 2 (el número del nodo, como entero).
+  nodo_numero: inventory_hostname | regex_replace('^[a-z]+', '') | int
+
+# Grupos condicionales (la expresión se evalúa por host).
+groups:
+  # Los compose de arriba ya existen aquí: las capas se aplican en orden.
+  nodos_pares: nodo_numero is even
+  nodos_impares: nodo_numero is odd
+
+# Grupos "keyed": un grupo por cada valor distinto de la expresión.
+keyed_groups:
+  # web1/web2 -> rol_web, db1 -> rol_db: deriva del NOMBRE lo que
+  # inventario_dinamico.py agrupa a mano — misma información, cero código.
+  - key: inventory_hostname | regex_replace('[0-9]+$', '')
+    prefix: rol
