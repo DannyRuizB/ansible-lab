@@ -8,7 +8,7 @@
 Laboratorio de aprendizaje de **Ansible** que funciona **100% en local**, en dos niveles:
 
 - **Playbooks 1-6, 8-12 y 15-19**: el "servidor" gestionado es la propia máquina (`localhost` con `ansible_connection=local`). Sin SSH, sin servidores remotos, sin permisos de administrador — todo ocurre dentro del directorio del proyecto.
-- **Playbooks 7, 13, 14 y 20 (opcionales)**: una "flota" de 3 contenedores Docker locales gestionados **por SSH real**, para practicar inventarios multi-host, estrategias de ejecución, delegación e inventario dinámico. Requiere Docker, pero sigue siendo local: los contenedores solo escuchan en `127.0.0.1`.
+- **Playbooks 7, 13, 14, 20 y 21 (opcionales)**: una "flota" de 3 contenedores Docker locales gestionados **por SSH real**, para practicar inventarios multi-host, estrategias de ejecución, delegación, inventario dinámico e inventario por capas. Requiere Docker, pero sigue siendo local: los contenedores solo escuchan en `127.0.0.1`.
 
 Forma parte de mi formación en automatización/DevOps con perfil de administración de sistemas (ASIR).
 
@@ -40,6 +40,7 @@ Forma parte de mi formación en automatización/DevOps con perfil de administrac
 | `playbooks/18_vault_a_fondo.yml` | **Vault a fondo** — la letra pequeña del cifrado (el 6 es el caso base): **vault-ids múltiples** (dev y prod con contraseñas distintas cargados juntos: `--vault-id dev@f1 --vault-id prod@f2`), **la trampa de las etiquetas** (por defecto NO se comprueban — Ansible prueba todas las llaves contra cada vault y con las etiquetas intercambiadas abre igual; `ANSIBLE_VAULT_ID_MATCH=True` las convierte en cerradura, demostrado con la misma orden fallando), **`encrypt_string`** (YAML en claro con un valor `!vault` dentro — el diff de git sigue legible), **`rekey`** (rotar la llave sin descifrar a disco: la vieja deja de abrir, la nueva sí) y **qué hay en disco** (header `1.2;AES256;dev` — la etiqueta viaja en claro, otra razón por la que no es secreto). Demos anidadas vía `18_demo_vault_ids.yml`, todo con `assert` |
 | `playbooks/19_filtros_a_medida.yml` | **Filtros Jinja a medida (Python)** — cuando ninguno de los ~50 filtros nativos (playbook 15) encaja, se escribe uno en Python en vez de contorsionar un one-liner. Un `filter_plugins/lab_filters.py` con una clase `FilterModule` cuyo `filters()` devuelve `{nombre: función}`; Ansible lo autodescubre por la ruta `filter_plugins` de `ansible.cfg` y desde ahí se usan como los built-in. Tres filtros propios — **`to_snake`** (CamelCase/kebab/espacios → snake_case), **`redact_secrets`** (enmascara dejando N chars, nunca filtra un secreto más corto que el prefijo) y **`human_bytes`** (1536 → `1.5 KiB`) — verificados con `assert`, encadenados con los nativos (`map('to_snake') | sort`) y usados dentro de una plantilla. No toca disco: idempotente por construcción |
 | `playbooks/20_inventario_dinamico.yml` | **Inventario dinámico** (sobre la flota) — el INI estático miente en cuanto la realidad cambia; un inventario dinámico pregunta a la **fuente de verdad** al ejecutar (aquí Docker; en producción AWS/Proxmox/NetBox). `inventario_dinamico.py` descubre los contenedores vivos y emite el **contrato**: `--list` con grupos + `_meta.hostvars` (la letra pequeña: sin `_meta`, Ansible ejecuta el script una vez más POR HOST) y `--host` por compatibilidad. Los errores de la fuente son **ruidosos** (docker caído = exit 1, no un inventario vacío que esconda el problema); flota parada sí es inventario vacío (dato, no error). Verificación doble: el contrato validado desde fuera (localhost) y **conexión SSH real** a lo descubierto, con `hostname` confirmando que cada puerto lleva al nodo que el inventario dice |
+| `playbooks/21_inventario_por_capas.yml` | **Inventario por capas: el plugin `constructed`** (sobre la flota) — una capa que se apila detrás de cualquier fuente (`-i fuente -i capa`, el orden importa) y deriva grupos y variables con Jinja, sin código: **`compose`** (`ssh_endpoint`, `nodo_numero`), **`groups`** condicionales (paridad) y **`keyed_groups`** (`rol_web`/`rol_db` derivados del nombre — lo que el script del 20 agrupa a mano, con cero código). Lo carga el plugin `auto` por la clave `plugin:`, sin tocar config. **La trampa es doble**: con `strict: false` (el default) un error de plantilla se traga EN SILENCIO (el grupo no aparece); con `strict: true` la capa falla… pero `ansible-inventory` sigue con **rc 0** — una fuente que no parsea se descarta con un warning, y solo `ANSIBLE_INVENTORY_ANY_UNPARSED_IS_FAILED` convierte el aviso en parada. Demostrado con la misma capa rota por los tres caminos, y rematado conectando **por SSH a un grupo que solo existe en la capa** (`rol_web`) |
 
 ## 📁 Estructura
 
@@ -52,6 +53,7 @@ ansible-lab/
 ├── requirements.yml                     # colecciones de Galaxy que usa el lab
 ├── inventario_flota.ini                 # inventario multi-host (grupos web/db)
 ├── inventario_dinamico.py               # inventario dinámico: descubre la flota en Docker (playbook 20)
+├── inventario_construido.yml            # capa constructed: grupos/vars derivados (playbook 21)
 ├── flota.sh                             # levantar/apagar los 3 nodos Docker
 ├── multihost/Dockerfile                 # imagen de nodo: Debian + sshd + python3
 ├── group_vars/
@@ -145,6 +147,7 @@ ansible-playbook -i inventario_flota.ini playbooks/07_flota_multihost.yml
 ansible-playbook -i inventario_flota.ini playbooks/13_estrategias_ejecucion.yml
 ansible-playbook -i inventario_flota.ini playbooks/14_delegacion_y_run_once.yml
 ansible-playbook -i inventario_dinamico.py playbooks/20_inventario_dinamico.yml
+ansible-playbook -i inventario_dinamico.py -i inventario_construido.yml playbooks/21_inventario_por_capas.yml
 ./flota.sh down        # apagar y eliminar la flota (no queda nada corriendo)
 ```
 

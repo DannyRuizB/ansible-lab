@@ -1,0 +1,160 @@
+---
+# =============================================================================
+# Playbook 21 — Inventario por capas: el plugin `constructed`
+#
+# El 20 enseñó a DESCUBRIR los hosts (script dinámico); este enseña a
+# DERIVAR de ellos grupos y variables sin escribir código: el plugin
+# `constructed` es una capa que se apila detrás de cualquier fuente
+# (-i fuente -i capa, el orden importa) y evalúa Jinja por host.
+#
+#   - compose ........ variables nuevas a partir de las existentes
+#       (ssh_endpoint = host:puerto, nodo_numero = web2 -> 2)
+#   - groups ......... grupos condicionales (nodos_pares si nodo_numero
+#       es par) — y los compose YA existen aquí: se aplica por capas
+#   - keyed_groups ... un grupo por valor distinto de una expresión
+#       (rol_web / rol_db derivados del NOMBRE del host: lo que el
+#       script agrupa a mano, reproducido con cero código)
+#
+#   - LA TRAMPA (doble): strict. Por defecto (strict: false) un error
+#       de plantilla se ignora EN SILENCIO — el grupo no aparece y nadie
+#       avisa. Con strict: true la capa falla… pero ansible-inventory
+#       SIGUE con rc 0: una fuente que no parsea se descarta con un
+#       warning. Solo ANSIBLE_INVENTORY_ANY_UNPARSED_IS_FAILED convierte
+#       el aviso en parada. Demostrado con la misma capa rota 3 veces.
+#
+# La verificación es doble: asserts sobre los grupos/vars derivados, y la
+# play 2 se conecta POR SSH a un grupo que solo existe en la capa (rol_web)
+# — si la capa no se aplicara, no habría hosts a los que conectar.
+#
+# Requiere la flota arriba (./flota.sh up && ./flota.sh esperar).
+#
+# Ejecutar (el orden de los -i importa: la capa detrás de la fuente):
+#   ansible-playbook -i inventario_dinamico.py -i inventario_construido.yml \
+#     playbooks/21_inventario_por_capas.yml
+#
+# (Idempotente: los ficheros de la demo strict van a entorno-prueba/, que
+#  se regenera; nada del sistema cambia.)
+# =============================================================================
+
+- name: La capa constructed deriva grupos y variables
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    demo_dir: "{{ playbook_dir }}/../entorno-prueba/constructed"
+
+  tasks:
+    # ── los grupos derivados existen y coinciden con los "a mano" ─────────
+    - name: Los keyed_groups reproducen la agrupación del script (rol_*)
+      ansible.builtin.assert:
+        that:
+          - groups['rol_web'] | sort == groups['web'] | sort
+          - groups['rol_db'] == groups['db']
+        success_msg: rol_web/rol_db (derivados del nombre) == web/db (a mano).
+        fail_msg: >-
+          Faltan los grupos derivados — ¿se lanzó sin apilar la capa?
+          (-i inventario_dinamico.py -i inventario_construido.yml, en ese orden)
+
+    - name: Los grupos condicionales parten la flota por paridad
+      ansible.builtin.assert:
+        that:
+          - groups['nodos_pares'] == ['web2']
+          - groups['nodos_impares'] | sort == ['db1', 'web1']
+        success_msg: nodos_pares=[web2], nodos_impares=[db1, web1].
+        fail_msg: la condición de paridad no agrupó como se esperaba.
+
+    # ── las variables compose llegan a cada host ──────────────────────────
+    - name: Cada host lleva sus variables derivadas (compose)
+      ansible.builtin.assert:
+        that:
+          - hostvars['web1'].ssh_endpoint == '127.0.0.1:2201'
+          - hostvars['web2'].nodo_numero == 2
+          - hostvars['db1'].nodo_numero == 1
+        success_msg: ssh_endpoint y nodo_numero existen sin haberlos escrito en ningún sitio.
+        fail_msg: las variables compose no se derivaron.
+
+    # ── LA TRAMPA de strict: el error silencioso ──────────────────────────
+    - name: Crear el rincón de la demo en entorno-prueba
+      ansible.builtin.file:
+        path: "{{ demo_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Preparar dos capas rotas (var inexistente), una laxa y una estricta
+      ansible.builtin.copy:
+        dest: "{{ demo_dir }}/{{ item.fichero }}"
+        mode: "0644"
+        content: |
+          plugin: constructed
+          strict: {{ item.strict }}
+          groups:
+            fantasma: variable_que_no_existe | int > 0
+      loop:
+        - { fichero: rota_laxa.yml, strict: "false" }
+        - { fichero: rota_estricta.yml, strict: "true" }
+
+    - name: Silencio nivel 1 — strict false traga el error y el grupo no existe
+      ansible.builtin.command:
+        cmd: >-
+          ansible-inventory -i {{ playbook_dir }}/../inventario_dinamico.py
+          -i {{ demo_dir }}/rota_laxa.yml --graph
+      register: laxa
+      changed_when: false
+
+    # SORPRESA cazada al escribir esto: strict true hace fallar LA CAPA,
+    # pero ansible-inventory sigue con rc 0 — una fuente que no parsea se
+    # DESCARTA con un warning y el resto del inventario continúa. El error
+    # sale por stderr, pero un CI que solo mire el rc no se entera.
+    - name: Silencio nivel 2 — strict true avisa por stderr pero el rc sigue a 0
+      ansible.builtin.command:
+        cmd: >-
+          ansible-inventory -i {{ playbook_dir }}/../inventario_dinamico.py
+          -i {{ demo_dir }}/rota_estricta.yml --graph
+      register: estricta_aviso
+      changed_when: false
+
+    - name: El freno de verdad — any_unparsed_is_failed convierte el aviso en parada
+      ansible.builtin.command:
+        cmd: >-
+          ansible-inventory -i {{ playbook_dir }}/../inventario_dinamico.py
+          -i {{ demo_dir }}/rota_estricta.yml --graph
+      environment:
+        ANSIBLE_INVENTORY_ANY_UNPARSED_IS_FAILED: "True"
+      register: estricta_freno
+      changed_when: false
+      failed_when: estricta_freno.rc == 0
+
+    - name: La trampa, verificada por los tres caminos
+      ansible.builtin.assert:
+        that:
+          # nivel 1: rc 0, sin grupo y SIN rastro del error — silencio total
+          - laxa.rc == 0
+          - "'fantasma' not in laxa.stdout"
+          - "'variable_que_no_existe' not in laxa.stderr"
+          # nivel 2: strict nombra la variable culpable… pero rc sigue a 0
+          - estricta_aviso.rc == 0
+          - "'variable_que_no_existe' in estricta_aviso.stderr"
+          - "'fantasma' not in estricta_aviso.stdout"
+          # nivel 3: con any_unparsed_is_failed el fallo por fin PARA (failed_when arriba)
+        success_msg: >-
+          strict:false = silencio total; strict:true = aviso con nombre pero rc 0;
+          solo any_unparsed_is_failed detiene la ejecución. Por eso la capa del
+          lab lleva strict: true — y un CI serio, además, la variable de entorno.
+        fail_msg: la semántica de strict / any_unparsed_is_failed no es la esperada.
+
+- name: Conectar a un grupo que solo existe en la capa
+  hosts: rol_web
+  gather_facts: false
+
+  tasks:
+    # Si la capa no se aplicara, "rol_web" no tendría hosts y esta play
+    # sería un no-op: el ping por SSH es la prueba de que la capa vive.
+    - name: Ping por SSH a los nodos del grupo derivado
+      ansible.builtin.ping:
+
+    - name: El endpoint derivado apunta exactamente a este nodo
+      ansible.builtin.assert:
+        that:
+          - ssh_endpoint == ansible_host ~ ':' ~ ansible_port
+        success_msg: "{{ inventory_hostname }} vive en {{ ssh_endpoint }} — capa y realidad coinciden."
+        fail_msg: el ssh_endpoint derivado no coincide con la conexión real.
