@@ -1,0 +1,154 @@
+---
+# =============================================================================
+# Playbook 24 — Action plugin a medida: el pegamento controlador ⇄ target
+#
+# Cuarta extensión en Python, tras filtros (19), callbacks (22) y lookups
+# (23). Un action plugin tiene DOS mitades: corre en el CONTROLADOR (ve
+# ficheros locales, el hostname del control, variables) y desde ahí ORQUESTA
+# un módulo EN EL TARGET. Un módulo normal corre entero en el nodo y jamás ve
+# el controlador; así están hechos `template`, `copy`, `fetch`, `assemble`.
+#
+# El plugin del laboratorio es action_plugins/lab_marca.py: construye en el
+# controlador el contenido de una marca —el hostname DEL CONTROLADOR más el
+# del nodo destino— y delega la escritura al módulo `copy` en el target.
+#
+# Lo que este playbook DEMUESTRA sobre la flota:
+#
+#   - Corre en el controlador: los tres nodos acaban con el MISMO hostname de
+#     controlador en su marca — un dato que ninguno podía conocer por sí
+#     mismo. Esa mitad se ejecutó aquí, no allí.
+#   - Orquesta el target: la escritura la hizo `copy` en el nodo (el fichero
+#     existe en el nodo, con sus permisos, y `copy` reporta changed).
+#   - Idempotente: contenido estable (sin timestamp) → changed la 1ª vez,
+#     changed=0 la 2ª, como cualquier tarea copy bien hecha.
+#   - Valida en el controlador: un argumento no soportado o un `dest` que
+#     falta paran ANTES de tocar el nodo (fallar barato).
+#
+# Ejecutar (necesita la flota arriba):
+#   ./flota.sh up && ./flota.sh esperar
+#   ansible-playbook -i inventario_flota.ini playbooks/24_action_a_medida.yml
+# =============================================================================
+
+- name: Capturar el hostname real del controlador (para comparar después)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Preguntar al controlador cómo se llama
+      ansible.builtin.command: hostname
+      register: hostname_controlador
+      changed_when: false
+
+    # Un set_fact persiste en hostvars['localhost'] durante toda la
+    # ejecución, así que el play de la flota lo lee sin fact-cache.
+    - name: Guardarlo para los plays siguientes
+      ansible.builtin.set_fact:
+        controlador_esperado: "{{ hostname_controlador.stdout | trim }}"
+
+- name: Escribir la marca en cada nodo con el action plugin
+  hosts: flota
+  gather_facts: false
+  vars:
+    marca: /home/ansible/lab-marca.txt
+    controlador_esperado: "{{ hostvars['localhost'].controlador_esperado }}"
+  tasks:
+    - name: Escribir la marca con lab_marca (calculada en el control, escrita por copy en el target)
+      lab_marca:
+        dest: "{{ marca }}"
+        note: "puesta por el playbook 24"
+      register: resultado_marca
+
+    - name: El action devuelve el hostname del CONTROLADOR, no el del nodo
+      ansible.builtin.assert:
+        that:
+          - resultado_marca.controller == controlador_esperado
+          - resultado_marca.controller != inventory_hostname
+          - resultado_marca.target == inventory_hostname
+        fail_msg: >-
+          El plugin dijo controller={{ resultado_marca.controller }}, esperaba
+          {{ controlador_esperado }} (y distinto de {{ inventory_hostname }})
+        success_msg: >-
+          {{ inventory_hostname }}: la marca la firmó el controlador
+          '{{ resultado_marca.controller }}', no el nodo — la mitad de
+          control se ejecutó en el controlador.
+
+    - name: Releer la marca YA ESCRITA en el nodo (eso lo hizo copy en el target)
+      ansible.builtin.slurp:
+        src: "{{ marca }}"
+      register: marca_en_nodo
+
+    - name: El fichero existe en el nodo y combina las dos mitades
+      ansible.builtin.assert:
+        that:
+          - "'controller=' ~ controlador_esperado in (marca_en_nodo.content | b64decode)"
+          - "'target=' ~ inventory_hostname in (marca_en_nodo.content | b64decode)"
+        fail_msg: "Contenido inesperado en {{ inventory_hostname }}: {{ marca_en_nodo.content | b64decode }}"
+        success_msg: "{{ inventory_hostname }}: el nodo tiene la marca escrita por copy, con ambos hostnames."
+
+    - name: Segunda pasada del action — copy es idempotente (changed=0)
+      lab_marca:
+        dest: "{{ marca }}"
+        note: "puesta por el playbook 24"
+      register: segunda_marca
+
+    - name: La marca no cambia en la 2ª pasada (contenido estable)
+      ansible.builtin.assert:
+        that:
+          - not segunda_marca.changed
+        fail_msg: "El action no fue idempotente: {{ segunda_marca }}"
+        success_msg: "{{ inventory_hostname }}: 2ª pasada changed=0 — contenido estable, copy no reescribe."
+
+    - name: Limpiar la marca
+      ansible.builtin.file:
+        path: "{{ marca }}"
+        state: absent
+
+- name: El action valida en el controlador antes de tocar el nodo
+  hosts: flota
+  gather_facts: false
+  run_once: true
+  tasks:
+    - name: Un argumento no soportado debe fallar (y barato)
+      block:
+        - name: Invocar lab_marca con un argumento inventado
+          lab_marca:
+            dest: /home/ansible/no-llega.txt
+            argumento_inventado: true
+        - name: No deberíamos llegar aquí
+          ansible.builtin.fail:
+            msg: "El action aceptó un argumento no soportado"
+      rescue:
+        - name: El error es ruidoso y se produjo en el controlador
+          # _VALID_ARGS del action hace que Ansible rechace el argumento en el
+          # controlador con "Invalid options for lab_marca: argumento_inventado".
+          ansible.builtin.assert:
+            that:
+              - "'Invalid options for lab_marca' in (ansible_failed_result.msg | default(''))"
+              - "'argumento_inventado' in (ansible_failed_result.msg | default(''))"
+            success_msg: "Argumento inválido → rechazado en el controlador → nada escrito en el nodo. Correcto."
+
+    - name: Y el fichero de esa llamada NO existe en el nodo
+      ansible.builtin.stat:
+        path: /home/ansible/no-llega.txt
+      register: no_llega
+
+    - name: Confirmar que la validación cortó antes del target
+      ansible.builtin.assert:
+        that:
+          - not no_llega.stat.exists
+        success_msg: "La validación del controlador cortó antes de tocar el nodo."
+
+- name: Recapitular lo aprendido
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Resumen
+      ansible.builtin.debug:
+        msg: >-
+          Un action plugin corre en el controlador y desde ahí orquesta un
+          módulo en el target — la mitad local calcula (ficheros, hostname,
+          vars) y la mitad remota actúa (self._execute_module). Un módulo
+          normal solo tiene la mitad remota. Valida barato en el controlador,
+          reutiliza copy en vez de reimplementar la escritura, y hereda su
+          idempotencia. Así están hechos template/copy/fetch de serie.
