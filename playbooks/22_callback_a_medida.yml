@@ -1,0 +1,151 @@
+---
+# =============================================================================
+# Playbook 22 — Callback plugin a medida: los OJOS de la ejecución
+#
+# El playbook 19 enseñó a extender Ansible con FILTROS (transforman datos
+# dentro de una plantilla). Este enseña la otra extensión clásica: un
+# CALLBACK — código Python que Ansible invoca en cada evento de la
+# ejecución (empieza una tarea, llega un resultado, acaba el playbook).
+# Es como se construyen métricas, notificaciones y logs estructurados;
+# ara_default o el clásico profile_tasks son exactamente esto.
+#
+# El plugin del laboratorio es callback_plugins/lab_resumen.py: anota
+# (tarea, host, estado, duración) de cada resultado y al acabar escribe
+# un resumen JSON ordenado de más lenta a más rápida.
+#
+# La letra pequeña que este playbook DEMUESTRA (no solo cuenta):
+#
+#   - Visible ≠ activo ..... con CALLBACK_NEEDS_ENABLED = True, estar en
+#       callback_plugins/ solo hace al plugin visible. Sin activarlo,
+#       Ansible lo ignora EN SILENCIO: misma orden, cero ficheros, cero
+#       avisos. La ronda 1 lo prueba con assert de "no existe".
+#
+#   - Activarlo es una variable .. ANSIBLE_CALLBACKS_ENABLED=lab_resumen
+#       en el entorno (o callbacks_enabled en ansible.cfg). La ronda 2
+#       es LA MISMA orden anidada con esa variable — y aparece el JSON.
+#
+#   - Opciones como Dios manda ... el plugin declara ruta_resumen en su
+#       DOCUMENTATION (env ANSIBLE_LAB_RESUMEN + ini + default) y la lee
+#       con get_option(): la precedencia la resuelve Ansible, no un
+#       os.environ.get() artesanal.
+#
+#   - aggregate, no stdout ....... corre AL LADO de la salida normal (la
+#       ronda 2 sigue imprimiendo el output de siempre); un stdout la
+#       SUSTITUIRÍA y solo puede haber uno.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/22_callback_a_medida.yml
+#
+# (Como el 16 y el 18: la verificación son sus asserts; la demo anidada
+#  regenera sus ficheros en cada pasada.)
+# =============================================================================
+
+- name: Preparar el terreno (carpeta limpia)
+  hosts: laboratorio
+  gather_facts: false
+  vars:
+    carpeta_22: /tmp/ansible-lab-22
+  tasks:
+    - name: Empezar sin restos de ejecuciones anteriores
+      ansible.builtin.file:
+        path: "{{ carpeta_22 }}"
+        state: absent
+
+    - name: Crear la carpeta de trabajo
+      ansible.builtin.file:
+        path: "{{ carpeta_22 }}"
+        state: directory
+        mode: "0755"
+
+- name: Ronda 1 — el callback existe pero NADIE lo ha activado
+  hosts: laboratorio
+  gather_facts: false
+  vars:
+    raiz_repo: "{{ playbook_dir }}/.."
+    ruta_resumen: /tmp/ansible-lab-22/resumen.json
+  tasks:
+    - name: Ejecutar la carga de trabajo SIN activar el callback
+      ansible.builtin.command:
+        cmd: ansible-playbook playbooks/22_demo_callback.yml
+        chdir: "{{ raiz_repo }}"
+      changed_when: true
+
+    - name: Comprobar si dejó resumen
+      ansible.builtin.stat:
+        path: "{{ ruta_resumen }}"
+      register: resumen_ronda1
+
+    - name: Visible NO es activo — sin activarlo, silencio absoluto
+      ansible.builtin.assert:
+        that:
+          - not resumen_ronda1.stat.exists
+        fail_msg: "El callback escribió sin estar activado — CALLBACK_NEEDS_ENABLED no se está respetando."
+        success_msg: >-
+          Misma carpeta callback_plugins/, misma orden: sin
+          ANSIBLE_CALLBACKS_ENABLED el plugin ni escribe ni avisa.
+
+- name: Ronda 2 — la MISMA orden, ahora con el callback activado
+  hosts: laboratorio
+  gather_facts: false
+  vars:
+    raiz_repo: "{{ playbook_dir }}/.."
+    ruta_resumen: /tmp/ansible-lab-22/resumen.json
+  tasks:
+    - name: Ejecutar la carga de trabajo CON el callback activado
+      ansible.builtin.command:
+        cmd: ansible-playbook playbooks/22_demo_callback.yml
+        chdir: "{{ raiz_repo }}"
+      environment:
+        ANSIBLE_CALLBACKS_ENABLED: lab_resumen
+        ANSIBLE_LAB_RESUMEN: "{{ ruta_resumen }}"
+      changed_when: true
+
+    - name: Leer el resumen que escribió el plugin
+      ansible.builtin.slurp:
+        src: "{{ ruta_resumen }}"
+      register: resumen_crudo
+
+    - name: Interpretar el JSON
+      ansible.builtin.set_fact:
+        resumen: "{{ resumen_crudo.content | b64decode | from_json }}"
+
+    - name: El resumen recoge las cuatro tareas de la carga
+      ansible.builtin.assert:
+        that:
+          - resumen.total_registros == 4
+          - resumen.registros | map(attribute='tarea') | sort ==
+            ['Cambio real en el terreno de pruebas', 'Fallo tolerado',
+             'Pausa de un segundo', 'Saltada a propósito'] | sort
+        fail_msg: "Faltan o sobran registros: {{ resumen.registros | map(attribute='tarea') | list }}"
+        success_msg: "4 tareas observadas, 4 registros — el callback vio toda la play."
+
+    - name: Cada estado quedó clasificado como toca
+      ansible.builtin.assert:
+        that:
+          - (resumen.registros | selectattr('tarea', 'eq', 'Pausa de un segundo') | first).estado == 'ok'
+          - (resumen.registros | selectattr('tarea', 'eq', 'Cambio real en el terreno de pruebas') | first).estado == 'changed'
+          - (resumen.registros | selectattr('tarea', 'eq', 'Saltada a propósito') | first).estado == 'skipped'
+          - (resumen.registros | selectattr('tarea', 'eq', 'Fallo tolerado') | first).estado == 'failed_ignorado'
+        fail_msg: "Algún estado no cuadra: {{ resumen.registros }}"
+        success_msg: >-
+          ok / changed / skipped / failed_ignorado — el callback distingue
+          los cuatro desenlaces (ignore_errors llega como flag del evento).
+
+    - name: La más lenta es la pausa, y su duración es real
+      ansible.builtin.assert:
+        that:
+          - resumen.mas_lenta.tarea == 'Pausa de un segundo'
+          - resumen.mas_lenta.duracion_s | float >= 1.0
+        fail_msg: "La ordenación por duración no cuadra: {{ resumen.mas_lenta }}"
+        success_msg: >-
+          El sleep 1 encabeza el resumen con {{ resumen.mas_lenta.duracion_s }}s
+          — medido entre el arranque de SU tarea y su resultado, no inventado.
+
+    - name: Recapitular lo aprendido
+      ansible.builtin.debug:
+        msg: >-
+          Un callback aggregate corre junto a la salida normal y ve TODOS los
+          eventos. En el path solo es visible; ANSIBLE_CALLBACKS_ENABLED lo
+          enciende. Opciones vía DOCUMENTATION + get_option(), nada de leer
+          el entorno a mano. Con esto se construye un profile_tasks o un
+          notificador de despliegues en ~100 líneas de Python.

@@ -172,6 +172,11 @@ jobs:
       - name: "Playbook 19 — filtros a medida (asserts incluidos)"
         run: ansible-playbook playbooks/19_filtros_a_medida.yml
 
+      # Como el 16 y el 18: la verificación son sus asserts (ronda sin
+      # activar = sin fichero; ronda activada = resumen JSON correcto).
+      - name: "Playbook 22 — callback a medida (asserts incluidos)"
+        run: ansible-playbook playbooks/22_callback_a_medida.yml
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \
