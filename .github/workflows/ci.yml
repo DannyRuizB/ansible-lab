@@ -259,6 +259,11 @@ jobs:
       - name: "Playbook 23 — lookup a medida (asserts incluidos)"
         run: ansible-playbook -i inventario_flota.ini playbooks/23_lookup_a_medida.yml
 
+      # Action plugin: corre en el controlador y orquesta copy en el target
+      # (verificación = sus asserts, incl. idempotencia y validación).
+      - name: "Playbook 24 — action a medida (asserts incluidos)"
+        run: ansible-playbook -i inventario_flota.ini playbooks/24_action_a_medida.yml
+
       - name: Apagar la flota
         if: always()
         run: ./flota.sh down
