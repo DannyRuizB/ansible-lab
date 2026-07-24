@@ -1,0 +1,20 @@
+---
+# =============================================================================
+# Auxiliar del playbook 24 — invoca lab_marca con un argumento no soportado
+# para que FALLE. Se invoca anidado (como 16/18 hacen con sus demos de fallo)
+# con `failed_when: rc == 0`, en vez de un block/rescue: un fallo rescatado en
+# el playbook principal hace que ansible-playbook devuelva rc 2 aunque el
+# recap diga failed=0, y el CI (bash -e) lo caza. Aislarlo aquí mantiene el
+# rc del 24 en 0. Vive en playbooks/ (no en playbooks/tasks/) para que
+# ansible-lint no lo trate como fichero de tareas.
+# =============================================================================
+
+- name: Provocar el rechazo de un argumento no soportado (en el controlador)
+  hosts: flota
+  gather_facts: false
+  run_once: true
+  tasks:
+    - name: Invocar lab_marca con un argumento inventado
+      lab_marca:
+        dest: /home/ansible/no-llega.txt
+        argumento_inventado: true
