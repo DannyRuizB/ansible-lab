@@ -1,0 +1,169 @@
+---
+# =============================================================================
+# Playbook 23 — Lookup plugin a medida: DATOS desde el CONTROLADOR
+#
+# Cierra la trilogía de extensiones en Python: filtros (19, transforman
+# datos dentro de una plantilla), callbacks (22, observan la ejecución) y
+# ahora lookups — que APORTAN datos a una tarea: `{{ lookup('x', arg) }}`.
+#
+# El plugin del laboratorio es lookup_plugins/lab_fichero.py: lee un fichero
+# y devuelve sus líneas (saltando comentarios por defecto). Su rasgo
+# definitorio, el que este playbook DEMUESTRA en vez de contar:
+#
+#   - Corre SIEMPRE EN EL CONTROLADOR. Aunque el play esté dirigido a la
+#     flota por SSH, el fichero se lee AQUÍ, no en el nodo. Play 3 lo prueba:
+#     lee un fichero que solo existe en el controlador y lo aterriza en tres
+#     contenedores que NUNCA lo tuvieron (stat remoto: no existe; la variable
+#     del lookup: llena).
+#
+#   - Devuelve una LISTA (el contrato). `wantlist=True` entrega la lista
+#     entera; sin él, el motor la aplana a texto separado por comas.
+#
+#   - Opciones vía DOCUMENTATION + get_option() (skip_comments, comment_char),
+#     nunca leyendo el entorno a mano — como los filtros y el callback.
+#
+#   - Un fichero que falta PARA el play (AnsibleError), no se cuela como "".
+#
+# Ejecutar (necesita la flota arriba para el play 3):
+#   ./flota.sh up && ./flota.sh esperar
+#   ansible-playbook -i inventario_flota.ini playbooks/23_lookup_a_medida.yml
+#
+# (Como el 16/18/22: la verificación son sus asserts; regenera su fichero.)
+# =============================================================================
+
+- name: Preparar un fichero que SOLO existe en el controlador
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    fuente: "{{ playbook_dir }}/../entorno-prueba/lookup/hosts_permitidos.txt"
+  tasks:
+    - name: Crear la carpeta del experimento
+      ansible.builtin.file:
+        path: "{{ fuente | dirname }}"
+        state: directory
+        mode: "0755"
+
+    - name: Escribir el fichero fuente (con comentarios y líneas en blanco)
+      ansible.builtin.copy:
+        dest: "{{ fuente }}"
+        mode: "0644"
+        content: |
+          # Hosts permitidos — leído por lab_fichero en el CONTROLADOR.
+          # Las líneas de comentario y en blanco se saltan por defecto.
+
+          10.0.0.10
+          10.0.0.11
+          10.0.0.12
+
+- name: El lookup lee del controlador y respeta sus opciones
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    fuente: "{{ playbook_dir }}/../entorno-prueba/lookup/hosts_permitidos.txt"
+    # wantlist: recibir la lista entera en vez del texto aplanado.
+    hosts_utiles: "{{ lookup('lab_fichero', fuente, wantlist=True) }}"
+    lineas_crudas: "{{ lookup('lab_fichero', fuente, skip_comments=False, wantlist=True) }}"
+  tasks:
+    - name: Por defecto salta comentarios y blancos — quedan las 3 IPs
+      ansible.builtin.assert:
+        that:
+          - hosts_utiles == ['10.0.0.10', '10.0.0.11', '10.0.0.12']
+        fail_msg: "Esperaba 3 IPs limpias, obtuve: {{ hosts_utiles }}"
+        success_msg: "lab_fichero devolvió las 3 IPs, sin comentarios ni blancos."
+
+    - name: Con skip_comments=False llegan también los comentarios
+      ansible.builtin.assert:
+        that:
+          - lineas_crudas | length > hosts_utiles | length
+          - lineas_crudas | select('match', '^#') | list | length == 2
+        fail_msg: "La opción skip_comments no cambió nada: {{ lineas_crudas }}"
+        success_msg: >-
+          skip_comments=False trae las {{ lineas_crudas | length }} líneas
+          (2 comentarios incluidos) — la opción se lee con get_option().
+
+    - name: Un fichero inexistente PARA el play (no devuelve "")
+      block:
+        - name: Intentar leer algo que no está
+          ansible.builtin.debug:
+            msg: "{{ lookup('lab_fichero', playbook_dir ~ '/no-existe.txt') }}"
+        - name: No deberíamos llegar aquí
+          ansible.builtin.fail:
+            msg: "El lookup tragó un fichero inexistente en vez de fallar"
+      rescue:
+        - name: El error es ruidoso, como debe ser
+          ansible.builtin.assert:
+            that:
+              - "'no existe el fichero' in (ansible_failed_result.msg | default(''))"
+            success_msg: "Fichero ausente → AnsibleError → play parado. Correcto."
+
+- name: La trampa — el lookup corre en el CONTROLADOR, no en el nodo
+  hosts: flota
+  gather_facts: false
+  vars:
+    fuente: "{{ playbook_dir }}/../entorno-prueba/lookup/hosts_permitidos.txt"
+    # /home/ansible es escribible por el usuario SSH de la flota (sin become).
+    destino: /home/ansible/hosts_permitidos.txt
+  tasks:
+    - name: El fichero fuente NO existe en el nodo remoto
+      ansible.builtin.stat:
+        path: "{{ fuente }}"
+      register: fuente_en_nodo
+
+    - name: Confirmar que el nodo nunca tuvo el fichero
+      ansible.builtin.assert:
+        that:
+          - not fuente_en_nodo.stat.exists
+        fail_msg: "El nodo {{ inventory_hostname }} tiene el fichero — se rompe la demo"
+        success_msg: "{{ inventory_hostname }}: la ruta del controlador no existe aquí."
+
+    # El lookup se evalúa en el controlador ANTES de que la tarea salga por
+    # SSH; el contenido viaja como argumento. Así aterriza en el nodo algo
+    # que el nodo no podía leer por sí mismo.
+    # TRAMPA cazada al escribir esto: `join('\n')` (y hasta join("\n")) deja
+    # la cadena LITERAL "\n" — Jinja no procesa esa secuencia de escape en sus
+    # literales. Un `{% for %}` dentro de un bloque literal YAML sí produce
+    # saltos de línea de verdad, una IP por línea.
+    - name: Aterrizar en el nodo la lista leída en el controlador
+      ansible.builtin.copy:
+        dest: "{{ destino }}"
+        mode: "0644"
+        content: |
+          {% for ip in lookup('lab_fichero', fuente, wantlist=True) %}
+          {{ ip }}
+          {% endfor %}
+
+    - name: Releer el fichero ya escrito en el nodo
+      ansible.builtin.slurp:
+        src: "{{ destino }}"
+      register: aterrizado
+
+    - name: El nodo tiene ahora las 3 IPs que solo vivían en el controlador
+      ansible.builtin.assert:
+        that:
+          - (aterrizado.content | b64decode).split('\n') | map('trim') | select() | list == ['10.0.0.10', '10.0.0.11', '10.0.0.12']
+        fail_msg: "Contenido inesperado en {{ inventory_hostname }}: {{ aterrizado.content | b64decode }}"
+        success_msg: >-
+          {{ inventory_hostname }}: recibió las 3 IPs por lookup del
+          controlador, sin haber tenido nunca el fichero fuente.
+
+    - name: Limpiar el fichero aterrizado
+      ansible.builtin.file:
+        path: "{{ destino }}"
+        state: absent
+
+- name: Recapitular lo aprendido
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Resumen
+      ansible.builtin.debug:
+        msg: >-
+          Un lookup aporta datos a la tarea y corre en el CONTROLADOR —
+          por eso distribuye a los nodos ficheros y secretos que solo
+          existen aquí. Devuelve una lista (wantlist para recibirla entera),
+          declara sus opciones en DOCUMENTATION y las lee con get_option(),
+          y falla ruidoso ante lo que no encuentra. Con esto se escribe un
+          lector de Vault, de una API de secretos o de un CMDB en pocas líneas.

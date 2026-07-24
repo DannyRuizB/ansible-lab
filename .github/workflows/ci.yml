@@ -254,6 +254,11 @@ jobs:
       - name: "Playbook 21 — inventario por capas (asserts incluidos)"
         run: ansible-playbook -i inventario_dinamico.py -i inventario_construido.yml playbooks/21_inventario_por_capas.yml
 
+      # Lookup plugin: el play 3 conecta a la flota por SSH para demostrar
+      # que el lookup corre en el controlador (verificación = sus asserts).
+      - name: "Playbook 23 — lookup a medida (asserts incluidos)"
+        run: ansible-playbook -i inventario_flota.ini playbooks/23_lookup_a_medida.yml
+
       - name: Apagar la flota
         if: always()
         run: ./flota.sh down
