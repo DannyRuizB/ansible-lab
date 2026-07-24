@@ -177,6 +177,11 @@ jobs:
       - name: "Playbook 22 — callback a medida (asserts incluidos)"
         run: ansible-playbook playbooks/22_callback_a_medida.yml
 
+      # Módulo a medida: corre en el target, changed/idempotencia/check_mode
+      # (verificación = sus asserts).
+      - name: "Playbook 25 — módulo a medida (asserts incluidos)"
+        run: ansible-playbook playbooks/25_modulo_a_medida.yml
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \
