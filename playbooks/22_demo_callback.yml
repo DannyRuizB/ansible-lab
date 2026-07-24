@@ -1,0 +1,44 @@
+---
+# =============================================================================
+# Auxiliar del playbook 22 — la "carga de trabajo" que el callback observa.
+#
+# No se ejecuta solo: lo invoca 22_callback_a_medida.yml dos veces (sin y
+# con el callback activado). Tareas elegidas para que el resumen tenga de
+# todo: una lenta (ok), un cambio real, una saltada y un fallo tolerado.
+# Vive en playbooks/ (no en playbooks/tasks/) por la convención de
+# ansible-lint: ahí dentro lo lintaría como fichero de tareas.
+# =============================================================================
+
+- name: Carga de trabajo instrumentada por el callback
+  hosts: laboratorio
+  gather_facts: false
+
+  tasks:
+    - name: Pausa de un segundo
+      ansible.builtin.command:
+        cmd: sleep 1
+      changed_when: false
+
+    # Contenido único por ejecución A PROPÓSITO: esta carga corre dos veces
+    # (ronda sin observar y ronda observada) y con contenido fijo la segunda
+    # pasada sería idempotente — el callback la vería como 'ok', no 'changed'.
+    - name: Cambio real en el terreno de pruebas
+      ansible.builtin.copy:
+        dest: /tmp/ansible-lab-22/marca.txt
+        content: "el callback me vio nacer: {{ lookup('pipe', 'date +%s%N') }}\n"
+        mode: "0644"
+
+    - name: Saltada a propósito
+      ansible.builtin.debug:
+        msg: "nunca me ejecuto"
+      when: false
+
+    # ignore_errors A PROPÓSITO (y no failed_when): el objetivo es que el
+    # callback reciba v2_runner_on_failed con ignore_errors=True — con
+    # failed_when: false el resultado llegaría como 'ok' y no habría nada
+    # que distinguir. El lint lo permite aquí por eso mismo.
+    - name: Fallo tolerado
+      ansible.builtin.command:
+        cmd: /bin/false
+      changed_when: false
+      ignore_errors: true # noqa: ignore-errors
