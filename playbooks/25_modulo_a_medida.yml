@@ -1,0 +1,113 @@
+---
+# =============================================================================
+# Playbook 25 — Módulo a medida: código que corre EN EL TARGET
+#
+# El playbook 24 mostró un action plugin: corre en el controlador y orquesta.
+# Este muestra su contrapunto, la extensión más fundamental — un MÓDULO:
+# Ansible copia library/lab_sello.py al nodo, lo ejecuta allí con el Python
+# del nodo, y recoge su JSON. Ve el sistema de ficheros del nodo, no el del
+# controlador.
+#
+# lab_sello asegura que un fichero de sello tenga un contenido dado. Lo que
+# este playbook DEMUESTRA (no solo cuenta):
+#
+#   - changed honesto: 1ª aplicación cambia, 2ª con el mismo contenido no
+#     (idempotencia = el contrato, no un extra).
+#   - check_mode: con contenido nuevo y `check_mode: true`, el módulo reporta
+#     changed=true PERO el fichero NO se toca (lo confirma un slurp).
+#   - corre en el target: el fichero aparece en el nodo (aquí localhost con
+#     connection local, pero el módulo se ejecuta como en cualquier nodo).
+#
+# Ejecutar:
+#   ansible-playbook playbooks/25_modulo_a_medida.yml
+#
+# (Como el 16/22/24: la verificación son sus asserts; regenera su terreno.)
+# =============================================================================
+
+- name: Módulo a medida — changed, idempotencia y check_mode
+  hosts: laboratorio
+  gather_facts: false
+  vars:
+    sello: /tmp/ansible-lab-25/sello.txt
+  tasks:
+    - name: Empezar sin restos de ejecuciones anteriores
+      ansible.builtin.file:
+        path: "{{ sello | dirname }}"
+        state: absent
+
+    - name: Primera aplicación — debe cambiar y crear el fichero
+      lab_sello:
+        path: "{{ sello }}"
+        content: "versión uno\n"
+      register: sello1
+
+    - name: La primera vez cambia
+      ansible.builtin.assert:
+        that:
+          - sello1.changed
+          - sello1.path == sello
+        success_msg: "1ª aplicación: changed=true, el módulo escribió el sello en el nodo."
+
+    - name: El fichero existe en el nodo con el contenido esperado
+      ansible.builtin.slurp:
+        src: "{{ sello }}"
+      register: leido1
+
+    - name: Confirmar el contenido escrito por el módulo
+      ansible.builtin.assert:
+        that:
+          - (leido1.content | b64decode) == "versión uno\n"
+        success_msg: "El sello del nodo contiene lo que el módulo escribió."
+
+    - name: Segunda aplicación, mismo contenido — NO debe cambiar
+      lab_sello:
+        path: "{{ sello }}"
+        content: "versión uno\n"
+      register: sello2
+
+    - name: Idempotente — la 2ª vez changed=false
+      ansible.builtin.assert:
+        that:
+          - not sello2.changed
+        fail_msg: "El módulo no fue idempotente: {{ sello2 }}"
+        success_msg: "2ª aplicación con el mismo contenido: changed=false. Idempotente."
+
+    - name: Contenido nuevo EN CHECK MODE — reporta cambio pero no toca el disco
+      lab_sello:
+        path: "{{ sello }}"
+        content: "versión dos\n"
+      check_mode: true
+      register: sello_check
+
+    - name: En check_mode el módulo informa del cambio que HARÍA
+      ansible.builtin.assert:
+        that:
+          - sello_check.changed
+        success_msg: "check_mode: el módulo dice que cambiaría (contenido distinto)."
+
+    - name: Releer el fichero tras el ensayo
+      ansible.builtin.slurp:
+        src: "{{ sello }}"
+      register: leido2
+
+    - name: Pero el disco NO se tocó — sigue la versión uno
+      ansible.builtin.assert:
+        that:
+          - (leido2.content | b64decode) == "versión uno\n"
+        fail_msg: "check_mode escribió de verdad: {{ leido2.content | b64decode }}"
+        success_msg: "check_mode no tocó el disco: el sello sigue en 'versión uno'. supports_check_mode cumplido."
+
+    - name: Limpiar el terreno
+      ansible.builtin.file:
+        path: "{{ sello | dirname }}"
+        state: absent
+
+    - name: Recapitular lo aprendido
+      ansible.builtin.debug:
+        msg: >-
+          Un módulo corre ENTERO en el target (Ansible copia el .py y lo
+          ejecuta con el Python del nodo) — lo contrario del action plugin
+          (24), que corre en el controlador. AnsibleModule valida los
+          argumentos (argument_spec), soporta check_mode sin tocar el disco,
+          y su changed es honesto: lee, compara y solo escribe si difiere.
+          Salidas solo por exit_json / fail_json.
