@@ -1,0 +1,67 @@
+---
+# =============================================================================
+# Playbook 26 — Vars plugin a medida: variables que llegan con el inventario
+#
+# La sexta y última pieza del tour de extensiones (filtros 19, callback 22,
+# lookup 23, action 24, módulo 25). Un vars plugin corre en el CONTROLADOR
+# cuando se carga el inventario: Ansible le pregunta por cada host y cada
+# grupo, y él contesta con variables desde la fuente que sea — aquí una
+# mini-CMDB YAML (vars/cmdb_lab.yml), en producción una API o una BD.
+#
+# Lo que este playbook DEMUESTRA (no solo cuenta):
+#
+#   - Las variables llegan SIN vars_files ni set_fact: estaban ya en el
+#     inventario cuando el play arrancó.
+#   - Precedencia host > grupo: cmdb_criticidad existe en ambos niveles de
+#     la CMDB y gana el valor del host (como host_vars vs group_vars).
+#   - LA TRAMPA de vars_plugins_enabled: la lista SUSTITUYE el default. Si
+#     se pone solo "lab_cmdb", el plugin de serie host_group_vars deja de
+#     cargar group_vars/host_vars EN SILENCIO en todo el proyecto. El
+#     testigo cmdb_grupo_testigo (group_vars/laboratorio.yml) vigila que la
+#     lista de ansible.cfg lleve los dos.
+#
+# La otra trampa (REQUIRES_ENABLED: verlo no es activarlo) la demuestra el
+# playbook hermano 26_demo_sin_habilitar.yml, que el CI ejecuta con
+# ANSIBLE_VARS_ENABLED=host_group_vars (sin lab_cmdb).
+#
+# Ejecutar:
+#   ansible-playbook playbooks/26_vars_a_medida.yml
+# =============================================================================
+
+- name: Vars plugin a medida — la CMDB llega con el inventario
+  hosts: laboratorio
+  gather_facts: false
+  tasks:
+    - name: Las variables de la CMDB están aquí sin cargar nada a mano
+      ansible.builtin.assert:
+        that:
+          - cmdb_planta is defined
+          - cmdb_planta == "sótano del laboratorio"
+          - cmdb_mantenimiento == "martes"
+        success_msg: >-
+          El plugin contestó por el host (cmdb_planta) y por el grupo
+          (cmdb_mantenimiento) al cargar el inventario — ni vars_files ni
+          set_fact.
+        fail_msg: >-
+          La CMDB no llegó: ¿está lab_cmdb en vars_plugins_enabled de
+          ansible.cfg?
+
+    - name: Precedencia — el valor del host pisa el del grupo
+      ansible.builtin.assert:
+        that:
+          - cmdb_criticidad == "alta"
+        success_msg: >-
+          cmdb_criticidad vale "alta" (host) y no "media" (grupo): mismo
+          orden que host_vars sobre group_vars.
+
+    - name: El testigo de host_group_vars sigue vivo (la trampa de la lista)
+      ansible.builtin.assert:
+        that:
+          - cmdb_grupo_testigo is defined
+        success_msg: >-
+          group_vars/ se sigue cargando: vars_plugins_enabled incluye
+          host_group_vars ADEMÁS de lab_cmdb.
+        fail_msg: >-
+          group_vars/ ha dejado de cargarse: vars_plugins_enabled ha
+          sustituido el default sin incluir host_group_vars — la trampa
+          exacta que este playbook vigila.

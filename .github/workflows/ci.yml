@@ -182,6 +182,16 @@ jobs:
       - name: "Playbook 25 — módulo a medida (asserts incluidos)"
         run: ansible-playbook playbooks/25_modulo_a_medida.yml
 
+      # Vars plugin: la CMDB llega con el inventario (asserts incluidos,
+      # incl. el testigo de que host_group_vars sigue en la lista).
+      - name: "Playbook 26 — vars plugin a medida (asserts incluidos)"
+        run: ansible-playbook playbooks/26_vars_a_medida.yml
+
+      # La trampa REQUIRES_ENABLED: misma ejecución pero con la lista de
+      # vars plugins SIN lab_cmdb — la CMDB no debe llegar y group_vars sí.
+      - name: "Playbook 26 — sin habilitar, el plugin no corre (demo)"
+        run: ANSIBLE_VARS_ENABLED=host_group_vars ansible-playbook playbooks/26_demo_sin_habilitar.yml
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \
