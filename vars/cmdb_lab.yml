@@ -6,11 +6,14 @@
 #
 # Precedencia deliberada: cmdb_criticidad existe en el grupo Y en el host —
 # el valor del host gana (mismo orden que group_vars vs host_vars).
-hosts:
+# OJO: claves 'nodos'/'grupos' y no 'hosts'/'groups' — este fichero vive en
+# vars/ y ansible-lint lo trata como vars de Ansible: esos dos nombres son
+# RESERVADOS (var-naming) y rompen el lint aunque aquí solo los lea el plugin.
+nodos:
   localhost:
     cmdb_planta: "sótano del laboratorio"
     cmdb_criticidad: "alta"
-groups:
+grupos:
   laboratorio:
     cmdb_criticidad: "media"
     cmdb_mantenimiento: "martes"

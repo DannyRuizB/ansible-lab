@@ -22,7 +22,7 @@ DOCUMENTATION = """
     short_description: variables por host/grupo desde la mini-CMDB del laboratorio
     description:
       - Lee vars/cmdb_lab.yml (relativo a la raíz del proyecto) y devuelve
-        el bloque hosts.<nombre> para cada host y groups.<nombre> para cada
+        el bloque nodos.<nombre> para cada host y grupos.<nombre> para cada
         grupo del inventario. Entidades que la CMDB no conoce reciben {}.
       - Declara REQUIRES_ENABLED, así que solo corre si aparece en
         vars_plugins_enabled (la trampa que enseña el playbook 26).
@@ -70,7 +70,7 @@ class VarsModule(BaseVarsPlugin):
         datos = {}
         for entity in entities:
             if isinstance(entity, Host):
-                datos.update(cmdb.get("hosts", {}).get(entity.name, {}) or {})
+                datos.update(cmdb.get("nodos", {}).get(entity.name, {}) or {})
             elif isinstance(entity, Group):
-                datos.update(cmdb.get("groups", {}).get(entity.name, {}) or {})
+                datos.update(cmdb.get("grupos", {}).get(entity.name, {}) or {})
         return datos
