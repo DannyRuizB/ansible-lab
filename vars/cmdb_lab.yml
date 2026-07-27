@@ -1,0 +1,19 @@
+---
+# Mini-CMDB del laboratorio: la fuente de datos del vars plugin lab_cmdb
+# (playbook 26). En producción esto sería una API o una base de datos; la
+# gracia del plugin es que la forma de la fuente da igual — Ansible solo ve
+# variables de inventario.
+#
+# Precedencia deliberada: cmdb_criticidad existe en el grupo Y en el host —
+# el valor del host gana (mismo orden que group_vars vs host_vars).
+# OJO: claves 'nodos'/'grupos' y no 'hosts'/'groups' — este fichero vive en
+# vars/ y ansible-lint lo trata como vars de Ansible: esos dos nombres son
+# RESERVADOS (var-naming) y rompen el lint aunque aquí solo los lea el plugin.
+nodos:
+  localhost:
+    cmdb_planta: "sótano del laboratorio"
+    cmdb_criticidad: "alta"
+grupos:
+  laboratorio:
+    cmdb_criticidad: "media"
+    cmdb_mantenimiento: "martes"

@@ -1,0 +1,6 @@
+---
+# Testigo del playbook 26: esta variable llega por el plugin de serie
+# host_group_vars (el que lee group_vars/). Si alguien configura
+# vars_plugins_enabled sin incluir host_group_vars, ESTA variable desaparece
+# en silencio de todo el proyecto — el assert del playbook 26 lo vigila.
+cmdb_grupo_testigo: "host_group_vars sigue activo"

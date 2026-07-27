@@ -1,0 +1,37 @@
+---
+# =============================================================================
+# Playbook 26 (demo) — sin habilitar, el vars plugin NO corre
+#
+# lab_cmdb declara REQUIRES_ENABLED = True: que Ansible lo VEA en
+# vars_plugins/ no basta (el mismo "visible no es activo" del callback 22).
+# Este playbook se ejecuta con la lista de plugins de vars SIN lab_cmdb:
+#
+#   ANSIBLE_VARS_ENABLED=host_group_vars \
+#     ansible-playbook playbooks/26_demo_sin_habilitar.yml
+#
+# y comprueba las dos caras: las variables de la CMDB NO están, pero las de
+# group_vars/ SÍ (host_group_vars sigue en la lista — quitar ese es la otra
+# trampa, la vigila el playbook 26 principal).
+# =============================================================================
+
+- name: Vars plugin sin habilitar — la CMDB no llega, group_vars sí
+  hosts: laboratorio
+  gather_facts: false
+  tasks:
+    - name: Sin lab_cmdb en la lista, sus variables no existen
+      ansible.builtin.assert:
+        that:
+          - cmdb_planta is not defined
+          - cmdb_mantenimiento is not defined
+        success_msg: >-
+          REQUIRES_ENABLED en acción: el plugin está en vars_plugins/ pero
+          sin opt-in no corre — ninguna variable de la CMDB llegó.
+        fail_msg: >-
+          La CMDB llegó sin estar lab_cmdb habilitado: ¿se ejecutó este
+          playbook sin el override ANSIBLE_VARS_ENABLED=host_group_vars?
+
+    - name: El plugin host_group_vars sigue en la lista y group_vars/ se carga
+      ansible.builtin.assert:
+        that:
+          - cmdb_grupo_testigo is defined
+        success_msg: "El testigo de group_vars/ está: solo faltó lab_cmdb."
