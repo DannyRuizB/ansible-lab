@@ -1,0 +1,16 @@
+---
+# El rol solo comprueba su propio sitio en la escalera: sus defaults pierden
+# contra CUALQUIER otra definición (aquí, el inventario ya los pisó), pero
+# cuando nadie define la variable, el default es lo que llega.
+- name: Los defaults del rol pierden contra el inventario, pero llegan si nadie más habla
+  ansible.builtin.assert:
+    that:
+      - prec_peldano != "defaults del rol"
+      - prec_solo_defaults == "defaults del rol"
+    success_msg: >-
+      prec_peldano vale "{{ prec_peldano }}" (el inventario pisó el default)
+      y prec_solo_defaults conserva el valor de fábrica — los defaults son el
+      suelo, no la decoración.
+    fail_msg: >-
+      O el default del rol está ganando a group_vars (imposible en Ansible
+      de serie), o alguien definió prec_solo_defaults fuera del rol.

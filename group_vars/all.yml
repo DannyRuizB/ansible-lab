@@ -1,0 +1,16 @@
+---
+# Variables del grupo implícito "all": el suelo del inventario — todo host
+# las hereda salvo que un grupo más específico, un host_vars o algo con más
+# precedencia las pise. Las prec_* son del playbook 27 (precedencia) y no
+# afectan al resto del laboratorio.
+
+# El peldaño más bajo de la escalera del playbook 27: cualquier grupo
+# específico (group_vars/web.yml) o host (host_vars/web1.yml) lo pisa.
+prec_peldano: "group_vars/all"
+
+# Para la trampa de los diccionarios: group_vars/web.yml redefine
+# prec_app_conf solo con "puerto"… y el diccionario entero se REEMPLAZA
+# (hash_behaviour=replace, el default): en los web, "debug" desaparece.
+prec_app_conf:
+  puerto: 80
+  debug: false

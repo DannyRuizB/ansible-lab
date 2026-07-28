@@ -1,0 +1,6 @@
+---
+# Variables SOLO de web1 (playbook 27 — precedencia): el nivel de host es el
+# más específico del inventario y pisa a su grupo (group_vars/web.yml) y al
+# suelo (group_vars/all.yml)… pero pierde contra las vars del play — eso es
+# lo que el playbook 27 demuestra.
+prec_peldano: "host_vars/web1"
