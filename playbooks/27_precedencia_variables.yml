@@ -1,0 +1,223 @@
+---
+# =============================================================================
+# Playbook 27 — Precedencia de variables a fondo (sobre la flota)
+#
+# La pregunta que más discusiones genera en cualquier proyecto Ansible real:
+# "¿por qué esta variable vale ESO aquí?". Ansible tiene 22 niveles de
+# precedencia documentados; este playbook demuestra con asserts los que
+# muerden de verdad en el día a día:
+#
+#   - LA ESCALERA: defaults del rol < group_vars/all < group_vars/<grupo>
+#     < host_vars/<host> — cada host de la flota ve el peldaño que le toca
+#     (db1 el suelo, web2 su grupo, web1 su host_vars).
+#   - Las VARS DEL PLAY pisan TODO el inventario — hasta host_vars, que
+#     dentro del inventario es lo más específico. El inventario propone;
+#     el play dispone.
+#   - Las vars de block pisan a las del play, y las de la tarea a las del
+#     block: cuanto más cerca de la tarea, más ganan.
+#   - EMPATES entre grupos hermanos: mismo nivel + misma variable = funde
+#     por orden ALFABÉTICO y el último pisa. El desempate explícito es
+#     ansible_group_priority (a más prioridad, más tarde funde = gana).
+#   - LOS DICCIONARIOS SE REEMPLAZAN, NO SE FUSIONAN (hash_behaviour=replace,
+#     el default): redefinir prec_app_conf en group_vars/web.yml con solo
+#     "puerto" hace DESAPARECER "debug" en los web. El arreglo: combine.
+#   - set_fact gana a las vars del play… pero NADA gana a un -e (extra
+#     vars): el set_fact "se ejecuta" con ok y el -e sigue mandando. Y el
+#     -e es GLOBAL: llega a todas las plays del run.
+#
+# Ejecutar (el -e es parte de la lección):
+#   ansible-playbook -i inventario_flota.ini \
+#     -e prec_ganador=extra playbooks/27_precedencia_variables.yml
+# =============================================================================
+
+- name: Precedencia (0/5) — el -e de la lección viene puesto
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Este playbook se lanza con -e prec_ganador=extra (es parte de la demo)
+      ansible.builtin.assert:
+        that:
+          - prec_ganador is defined
+          - prec_ganador == "extra"
+        fail_msg: >-
+          Lánzalo como dice la cabecera:
+          ansible-playbook -i inventario_flota.ini -e prec_ganador=extra
+          playbooks/27_precedencia_variables.yml
+        success_msg: "-e prec_ganador=extra presente: empezamos."
+
+- name: Precedencia (1/5) — la escalera del inventario
+  hosts: flota
+  gather_facts: false
+  roles:
+    # Sus defaults son el peldaño más bajo; el propio rol lo comprueba.
+    - prec_demo
+  tasks:
+    - name: Cada host ve el peldaño que le toca (all < grupo < host)
+      ansible.builtin.assert:
+        that:
+          - prec_peldano == esperado[inventory_hostname]
+        success_msg: >-
+          {{ inventory_hostname }} ve "{{ prec_peldano }}": db1 hereda el
+          suelo (all), web2 el grupo, y en web1 gana su host_vars.
+        fail_msg: >-
+          {{ inventory_hostname }} esperaba "{{ esperado[inventory_hostname] }}"
+          y ve "{{ prec_peldano }}".
+      vars:
+        esperado:
+          web1: "host_vars/web1"
+          web2: "group_vars/web"
+          db1: "group_vars/all"
+
+- name: Precedencia (2/5) — el play pisa el inventario; block y tarea, al play
+  hosts: flota
+  gather_facts: false
+  vars:
+    # Con esto TODA la escalera del inventario deja de importar: hasta el
+    # host_vars de web1 (lo más específico del inventario) pierde aquí.
+    prec_peldano: "vars del play"
+  tasks:
+    - name: Las vars del play ganan al inventario entero (host_vars incluido)
+      ansible.builtin.assert:
+        that:
+          - prec_peldano == "vars del play"
+        success_msg: >-
+          También en web1: su host_vars mandaba dentro del inventario, pero
+          el play va por encima. El inventario propone; el play dispone.
+
+    - name: Un block puede acercar la variable aún más
+      vars:
+        prec_peldano: "vars del block"
+      block:
+        - name: Dentro del block ganan las vars del block
+          ansible.builtin.assert:
+            that:
+              - prec_peldano == "vars del block"
+
+        - name: Y las vars de la tarea ganan al block (cuanto más cerca, más manda)
+          ansible.builtin.assert:
+            that:
+              - prec_peldano == "vars de la tarea"
+            success_msg: >-
+              play < block < tarea: la definición más cercana a la tarea es
+              la que la tarea ve.
+          vars:
+            prec_peldano: "vars de la tarea"
+
+- name: Precedencia (3/5) — empates entre grupos hermanos
+  hosts: web2:db1
+  gather_facts: false
+  tasks:
+    - name: Sin prioridades, el empate lo gana el último grupo en alfabeto
+      ansible.builtin.assert:
+        that:
+          - prec_bando == "b"
+        success_msg: >-
+          web2 está en prec_empate_a y prec_empate_b, ambos definen
+          prec_bando: los grupos del mismo nivel funden en orden alfabético
+          y el ÚLTIMO pisa — gana la "b". Nadie eligió esto: es un empate
+          resuelto por el abecedario.
+        fail_msg: "prec_bando vale {{ prec_bando }} — ¿cambió la regla de fusión?"
+      when: inventory_hostname == "web2"
+
+    - name: Con ansible_group_priority el desempate es una decisión, no el abecedario
+      ansible.builtin.assert:
+        that:
+          - prec_bando_prio == "a"
+        success_msg: >-
+          db1 está en prec_prio_a (priority 10) y prec_prio_z (default 1):
+          a más prioridad, más tarde se funde y por tanto GANA — la "a" le
+          quita el empate a la "z" aunque el alfabeto diga lo contrario.
+        fail_msg: "prec_bando_prio vale {{ prec_bando_prio }} — la prioridad no se aplicó."
+      when: inventory_hostname == "db1"
+
+- name: Precedencia (4/5) — los diccionarios se reemplazan, no se fusionan
+  hosts: flota
+  gather_facts: false
+  tasks:
+    - name: En los web, redefinir el dict con solo "puerto" borró "debug"
+      ansible.builtin.assert:
+        that:
+          - prec_app_conf.puerto == 8080
+          - prec_app_conf.debug is not defined
+        success_msg: >-
+          group_vars/web.yml puso prec_app_conf con solo "puerto" y el
+          diccionario de all.yml se REEMPLAZÓ entero: debug ya no existe.
+          hash_behaviour=replace es el default (y el que hay que asumir).
+        fail_msg: >-
+          prec_app_conf en {{ inventory_hostname }}: {{ prec_app_conf }} —
+          ¿alguien activó hash_behaviour=merge? (deprecado: no usar).
+      when: "'web' in group_names"
+
+    - name: En db1 el dict del suelo sigue entero
+      ansible.builtin.assert:
+        that:
+          - prec_app_conf.puerto == 80
+          - prec_app_conf.debug == false
+      when: inventory_hostname == "db1"
+
+    - name: El arreglo es fusionar a mano con combine, no confiar en la herencia
+      ansible.builtin.assert:
+        that:
+          - fusionada.puerto == 8080
+          - fusionada.debug == false
+        success_msg: >-
+          base | combine(parche) conserva "debug" y actualiza "puerto":
+          la fusión de diccionarios en Ansible se pide explícita, no viene
+          de serie.
+      vars:
+        fusionada: "{{ {'puerto': 80, 'debug': false} | combine(prec_app_conf) }}"
+      when: "'web' in group_names"
+
+- name: Precedencia (5/5) — set_fact gana al play, pero NADA gana a un -e
+  hosts: flota
+  gather_facts: false
+  vars:
+    prec_ganador: "vars del play"
+    prec_hecho: "vars del play"
+  tasks:
+    - name: El -e pisa las vars del play sin despeinarse
+      ansible.builtin.assert:
+        that:
+          - prec_ganador == "extra"
+        success_msg: >-
+          El play dice "vars del play"; la orden llevaba -e
+          prec_ganador=extra — y un extra var gana SIEMPRE.
+
+    - name: Un set_fact normal sí gana a las vars del play
+      ansible.builtin.set_fact:
+        prec_hecho: "set_fact"
+
+    - name: Comprobado — set_fact por encima del play
+      ansible.builtin.assert:
+        that:
+          - prec_hecho == "set_fact"
+
+    - name: LA TRAMPA — este set_fact se ejecuta con "ok"…
+      ansible.builtin.set_fact:
+        prec_ganador: "set_fact"
+
+    - name: …y sin embargo el -e sigue mandando
+      ansible.builtin.assert:
+        that:
+          - prec_ganador == "extra"
+        success_msg: >-
+          El set_fact anterior terminó en "ok" (nada avisó) y prec_ganador
+          sigue valiendo "extra": un extra var no se puede pisar desde
+          dentro del playbook. Si un valor "no cambia ni con set_fact",
+          busca el -e en la orden (o en la plantilla de AWX/Semaphore).
+        fail_msg: "prec_ganador vale {{ prec_ganador }} — ¿corrió sin el -e?"
+
+# El -e no es de una play: es del RUN entero. Esta play ni lo menciona en
+# sus vars y aun así lo ve — por eso un -e olvidado en una plantilla de
+# Semaphore/AWX "contamina" todo lo que esa plantilla lanza.
+- name: Precedencia (bonus) — el -e es global a todas las plays del run
+  hosts: db
+  gather_facts: false
+  tasks:
+    - name: También aquí, sin declararlo, prec_ganador es el del -e
+      ansible.builtin.assert:
+        that:
+          - prec_ganador == "extra"
+        success_msg: >-
+          Play nueva, hosts distintos, cero vars declaradas: el -e llega
+          igual. Global de verdad.

@@ -279,6 +279,11 @@ jobs:
       - name: "Playbook 24 — action a medida (asserts incluidos)"
         run: ansible-playbook -i inventario_flota.ini playbooks/24_action_a_medida.yml
 
+      # Precedencia: el -e es parte de la lección — el playbook exige
+      # prec_ganador=extra y demuestra que nada lo puede pisar desde dentro.
+      - name: "Playbook 27 — precedencia de variables (asserts incluidos)"
+        run: ansible-playbook -i inventario_flota.ini -e prec_ganador=extra playbooks/27_precedencia_variables.yml
+
       - name: Apagar la flota
         if: always()
         run: ./flota.sh down

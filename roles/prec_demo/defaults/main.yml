@@ -1,0 +1,12 @@
+---
+# Los defaults de un rol son el PELDAÑO MÁS BAJO de toda la precedencia:
+# están pensados para que cualquiera los pise (inventario, play, -e…).
+# Por eso un rol reutilizable pone aquí sus valores "de fábrica".
+# Los noqa son deliberados: la gracia de la demo es que sea LA MISMA
+# variable en todas las capas (rol, all, grupo, host, play) — el prefijo
+# prec_demo_ que pide el linter rompería la lección.
+prec_peldano: "defaults del rol" # noqa: var-naming[no-role-prefix]
+
+# Esta no la define nadie más en el proyecto: como nadie la pisa, el default
+# sí llega — un default no es decorativo, es el valor cuando todos callan.
+prec_solo_defaults: "defaults del rol" # noqa: var-naming[no-role-prefix]
