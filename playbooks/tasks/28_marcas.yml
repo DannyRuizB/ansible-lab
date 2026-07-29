@@ -1,0 +1,21 @@
+---
+# Tareas marcadoras del playbook 28. El MISMO fichero se trae dos veces
+# desde 28_demo_tags.yml — una con import_tasks y otra con include_tasks,
+# ambas etiquetadas — para demostrar que la tag del import BAJA hasta
+# estas tareas (estático: se copian al parsear) y la del include NO
+# (dinámico: la tag se queda en la sentencia include). Ninguna tarea de
+# aquí lleva tags propias: eso es justo lo que hace visible la diferencia.
+
+- name: Dejar la primera marca interior
+  ansible.builtin.lineinfile:
+    path: "{{ registro }}"
+    line: "{{ origen }}_1"
+    create: true
+    mode: "0644"
+
+- name: Dejar la segunda marca interior
+  ansible.builtin.lineinfile:
+    path: "{{ registro }}"
+    line: "{{ origen }}_2"
+    create: true
+    mode: "0644"

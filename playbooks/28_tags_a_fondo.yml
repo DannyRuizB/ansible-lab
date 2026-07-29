@@ -1,0 +1,156 @@
+---
+# =============================================================================
+# Playbook 28 — Tags y --skip-tags a fondo
+#
+# Las tags parecen lo más simple de Ansible ("etiqueto y selecciono") y
+# esconden más letra pequeña de la que aparentan. Este playbook la
+# DEMUESTRA ejecutando 28_demo_tags.yml una vez POR ESCENA — la selección
+# de tags es de la ORDEN, no del YAML, así que cada escena es una orden
+# anidada distinta — y comprobando con asserts qué tareas dejaron marca:
+#
+#   - Sin selección corre TODO menos never; con --tags X corren X y
+#     always, y las tareas sin tags DESAPARECEN (la sorpresa habitual:
+#     "--tags deploy" también deja fuera todo lo no etiquetado).
+#   - Las tags de un block se HEREDAN por sus tareas.
+#   - always corre con cualquier selección — y --skip-tags always es la
+#     única forma de quitarlo.
+#   - never + debug: la tarea no corre NUNCA salvo que alguien pida esa
+#     otra tag a propósito (--tags debug). El patrón de diagnóstico.
+#   - LA TRAMPA GORDA — import vs include con tags: la tag de un
+#     import_tasks (estático) SE COPIA a cada tarea importada; la de un
+#     include_tasks (dinámico) se queda en la SENTENCIA: con
+#     --tags incluido el include carga el fichero y NINGUNA tarea
+#     interior corre (sin tags + selección activa = fuera). El arreglo:
+#     apply: {tags: [...]} en el include (o pasarse a import_tasks).
+#   - Selectores especiales: --tags untagged trae solo lo sin etiquetar
+#     (más always, claro).
+#   - ansible-playbook --list-tags enseña el inventario de tags sin
+#     ejecutar nada: la forma civilizada de descubrir qué se puede pedir.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/28_tags_a_fondo.yml
+#
+# (Como el 22 y el 26: la verificación son sus asserts; las órdenes
+#  anidadas regeneran sus marcas en cada pasada.)
+# =============================================================================
+
+- name: Tags (1/2) — nueve escenas, nueve selecciones
+  hosts: laboratorio
+  gather_facts: false
+  vars:
+    raiz_repo: "{{ playbook_dir }}/.."
+    carpeta_28: /tmp/ansible-lab-28
+    # Cada escena: la orden (flags) y las marcas EXACTAS que debe dejar.
+    escenas:
+      - id: sin_seleccion
+        flags: ""
+        esperado: [sin_tags, config, deploy, web_a, web_b, always,
+                   importado_1, importado_2, incluido_1, incluido_2,
+                   aplicado_1, aplicado_2]
+      - id: tags_config
+        flags: "--tags config"
+        esperado: [config, always]
+      - id: tags_web
+        flags: "--tags web"
+        esperado: [web_a, web_b, always]
+      - id: tags_importado
+        flags: "--tags importado"
+        esperado: [importado_1, importado_2, always]
+      # La trampa: el include corre, sus tareas interiores no.
+      - id: tags_incluido
+        flags: "--tags incluido"
+        esperado: [always]
+      - id: tags_con_apply
+        flags: "--tags con_apply"
+        esperado: [aplicado_1, aplicado_2, always]
+      - id: tags_debug
+        flags: "--tags debug"
+        esperado: [never_debug, always]
+      - id: skip_always
+        flags: "--skip-tags always"
+        esperado: [sin_tags, config, deploy, web_a, web_b,
+                   importado_1, importado_2, incluido_1, incluido_2,
+                   aplicado_1, aplicado_2]
+      - id: tags_untagged
+        flags: "--tags untagged"
+        esperado: [sin_tags, always]
+  tasks:
+    - name: Empezar sin restos de ejecuciones anteriores
+      ansible.builtin.file:
+        path: "{{ carpeta_28 }}"
+        state: absent
+
+    - name: Crear la carpeta de marcas
+      ansible.builtin.file:
+        path: "{{ carpeta_28 }}"
+        state: directory
+        mode: "0755"
+
+    - name: Ejecutar cada escena (la selección de tags es de la orden, no del YAML)
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook {{ item.flags }}
+          -e registro={{ carpeta_28 }}/{{ item.id }}.txt
+          playbooks/28_demo_tags.yml
+        chdir: "{{ raiz_repo }}"
+      loop: "{{ escenas }}"
+      loop_control:
+        label: "{{ item.id }}"
+      changed_when: true
+
+    - name: Leer las marcas que dejó cada escena
+      ansible.builtin.slurp:
+        src: "{{ carpeta_28 }}/{{ item.id }}.txt"
+      loop: "{{ escenas }}"
+      loop_control:
+        label: "{{ item.id }}"
+      register: marcas_crudas
+
+    - name: Cada escena dejó EXACTAMENTE las marcas esperadas
+      ansible.builtin.assert:
+        that:
+          - (item.content | b64decode).splitlines() | sort == item.item.esperado | sort
+        fail_msg: >-
+          {{ item.item.id }}: esperaba {{ item.item.esperado | sort }}
+          y hay {{ (item.content | b64decode).splitlines() | sort }}.
+        success_msg: >-
+          {{ item.item.id }}: {{ item.item.esperado | length }} marcas, las
+          esperadas — ni una más ni una menos.
+      loop: "{{ marcas_crudas.results }}"
+      loop_control:
+        label: "{{ item.item.id }}"
+
+- name: Tags (2/2) — el inventario de tags sin ejecutar nada
+  hosts: laboratorio
+  gather_facts: false
+  vars:
+    raiz_repo: "{{ playbook_dir }}/.."
+  tasks:
+    - name: Pedir el catálogo con --list-tags
+      ansible.builtin.command:
+        cmd: ansible-playbook --list-tags playbooks/28_demo_tags.yml
+        chdir: "{{ raiz_repo }}"
+      changed_when: false
+      register: listado_tags
+
+    - name: El catálogo enseña todas las tags — never y always incluidas
+      ansible.builtin.assert:
+        that:
+          - "'never' in listado_tags.stdout"
+          - "'always' in listado_tags.stdout"
+          - "'con_apply' in listado_tags.stdout"
+          - "'importado' in listado_tags.stdout"
+        fail_msg: "--list-tags no enseña el catálogo completo: {{ listado_tags.stdout }}"
+        success_msg: >-
+          --list-tags lista el catálogo entero sin ejecutar nada: la forma
+          civilizada de descubrir qué se puede pedir antes de lanzar.
+
+    - name: Moraleja
+      ansible.builtin.debug:
+        msg: >-
+          Nueve escenas, nueve selecciones distintas del MISMO YAML. La que
+          muerde en producción es la del include: --tags sobre include_tasks
+          carga el fichero y no ejecuta nada de dentro — usa apply o
+          import_tasks. Y recuerda que --tags X apaga todo lo no etiquetado:
+          las tareas "de siempre" necesitan la tag always (y --skip-tags
+          always existe para saltárselas).
