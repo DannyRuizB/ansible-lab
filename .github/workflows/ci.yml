@@ -192,6 +192,11 @@ jobs:
       - name: "Playbook 26 — sin habilitar, el plugin no corre (demo)"
         run: ANSIBLE_VARS_ENABLED=host_group_vars ansible-playbook playbooks/26_demo_sin_habilitar.yml
 
+      # Tags: nueve escenas anidadas (--tags/--skip-tags son de la orden,
+      # no del YAML), con la trampa include vs import demostrada.
+      - name: "Playbook 28 — tags a fondo (asserts incluidos)"
+        run: ansible-playbook playbooks/28_tags_a_fondo.yml
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \

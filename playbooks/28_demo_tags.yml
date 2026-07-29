@@ -1,0 +1,106 @@
+---
+# =============================================================================
+# Demo interior del playbook 28 (lo lanza 28_tags_a_fondo.yml, no se
+# ejecuta a mano). Cada tarea deja una marca en {{ registro }}; el
+# playbook exterior lo ejecuta varias veces con distintos --tags /
+# --skip-tags y comprueba qué marcas aparecen. Las tags viven en el YAML,
+# pero LA SELECCIÓN es de la orden: por eso hace falta una orden anidada
+# por escena.
+# =============================================================================
+
+- name: Demo de tags — cada tarea deja su marca
+  hosts: localhost
+  gather_facts: false
+  vars:
+    registro: /tmp/ansible-lab-28/sin_escena.txt
+  tasks:
+    - name: Marca sin tags (corre por defecto; desaparece con --tags <algo>)
+      ansible.builtin.lineinfile:
+        path: "{{ registro }}"
+        line: "sin_tags"
+        create: true
+        mode: "0644"
+
+    - name: Marca config
+      ansible.builtin.lineinfile:
+        path: "{{ registro }}"
+        line: "config"
+        create: true
+        mode: "0644"
+      tags: [config]
+
+    - name: Marca deploy
+      ansible.builtin.lineinfile:
+        path: "{{ registro }}"
+        line: "deploy"
+        create: true
+        mode: "0644"
+      tags: [deploy]
+
+    # Las tags de un block se HEREDAN: seleccionar "web" trae a sus dos
+    # tareas aunque ninguna lleve la tag escrita encima.
+    - name: Bloque etiquetado web
+      tags: [web]
+      block:
+        - name: Marca web_a (hereda la tag del block)
+          ansible.builtin.lineinfile:
+            path: "{{ registro }}"
+            line: "web_a"
+            create: true
+            mode: "0644"
+
+        - name: Marca web_b (hereda la tag del block)
+          ansible.builtin.lineinfile:
+            path: "{{ registro }}"
+            line: "web_b"
+            create: true
+            mode: "0644"
+
+    - name: Marca always (corre con CUALQUIER selección; solo la quita --skip-tags always)
+      ansible.builtin.lineinfile:
+        path: "{{ registro }}"
+        line: "always"
+        create: true
+        mode: "0644"
+      tags: [always]
+
+    # never + otra tag es el patrón de las tareas de depuración: no corren
+    # NUNCA por defecto, solo cuando alguien pide la otra tag a propósito.
+    - name: Marca never_debug (solo si piden debug explícitamente)
+      ansible.builtin.lineinfile:
+        path: "{{ registro }}"
+        line: "never_debug"
+        create: true
+        mode: "0644"
+      tags: [never, debug]
+
+    # ESTÁTICO: import_tasks se resuelve al PARSEAR, y la tag se copia a
+    # cada tarea importada — seleccionar "importado" las trae todas.
+    - name: Traer las marcas por import_tasks (la tag baja)
+      ansible.builtin.import_tasks:
+        file: tasks/28_marcas.yml
+      vars:
+        origen: importado
+      tags: [importado]
+
+    # DINÁMICO: include_tasks se resuelve al EJECUTAR, y la tag se queda
+    # en ESTA sentencia. Con --tags incluido el include corre (carga el
+    # fichero)… y ninguna tarea interior corre: son tareas sin tags en un
+    # run con selección activa. La trampa clásica.
+    - name: Traer las marcas por include_tasks (la tag NO baja)
+      ansible.builtin.include_tasks:
+        file: tasks/28_marcas.yml
+      vars:
+        origen: incluido
+      tags: [incluido]
+
+    # El arreglo del include: apply estampa las tags sobre las tareas
+    # interiores al vuelo. (El otro arreglo es usar import_tasks.)
+    - name: Traer las marcas por include_tasks con apply (el arreglo)
+      ansible.builtin.include_tasks:
+        file: tasks/28_marcas.yml
+        apply:
+          tags: [con_apply]
+      vars:
+        origen: aplicado
+      tags: [con_apply]
