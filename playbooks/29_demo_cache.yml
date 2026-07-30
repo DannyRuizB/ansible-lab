@@ -1,0 +1,41 @@
+---
+# =============================================================================
+# Demo interior del playbook 29 (lo lanza 29_cache_de_facts.yml, no se
+# ejecuta a mano). Recoge facts según la política que le llega POR
+# ENTORNO (ANSIBLE_GATHERING / ANSIBLE_CACHE_PLUGIN…, puestas por la
+# orden exterior — a propósito no hay gather_facts explícito: manda la
+# política) y deja en {{ registro }} lo que vio:
+#
+#   - epoch_facts: la hora que traen sus facts (ansible_date_time.epoch).
+#     Si los facts salieron de la caché, esta hora viene CONGELADA de la
+#     pasada que los recogió — la prueba de que aquí no hubo setup.
+#   - sello_venia: el sello cacheable que una pasada ANTERIOR dejó en la
+#     caché, mirado antes de plantar nada en esta.
+#
+# Además planta {{ sello }} como fact CACHEABLE: con un backend de caché
+# configurado viaja al fichero del host y sobrevive a este proceso; sin
+# backend (plugin 'memory', el de serie) muere con el proceso.
+# =============================================================================
+
+- name: Demo de caché — anotar de qué pasada son mis facts
+  hosts: localhost
+  vars:
+    registro: /tmp/ansible-lab-29/sin_escena.json
+    sello: sin-sello
+  tasks:
+    - name: ¿Venía ya un sello en los facts? (mirar ANTES de plantar el nuevo)
+      ansible.builtin.set_fact:
+        sello_venia: "{{ ansible_facts.sello_cacheable | default('NO') }}"
+
+    - name: Plantar el sello de esta pasada como fact CACHEABLE
+      ansible.builtin.set_fact:
+        sello_cacheable: "{{ sello }}"
+        cacheable: true
+
+    - name: Dejar el registro de esta pasada
+      ansible.builtin.copy:
+        dest: "{{ registro }}"
+        mode: "0644"
+        content: >-
+          {{ {'epoch_facts': ansible_facts.date_time.epoch,
+              'sello_venia': sello_venia} | to_nice_json }}
