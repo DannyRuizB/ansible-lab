@@ -197,6 +197,11 @@ jobs:
       - name: "Playbook 28 — tags a fondo (asserts incluidos)"
         run: ansible-playbook playbooks/28_tags_a_fondo.yml
 
+      # Caché de facts: órdenes anidadas con jsonfile+smart — hora
+      # congelada, sello cacheable cruzando procesos y caducidad.
+      - name: "Playbook 29 — caché de facts (asserts incluidos)"
+        run: ansible-playbook playbooks/29_cache_de_facts.yml
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \

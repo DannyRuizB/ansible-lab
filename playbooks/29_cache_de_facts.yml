@@ -1,0 +1,228 @@
+---
+# =============================================================================
+# Playbook 29 — Caché de facts: gathering smart, jsonfile y caducidad
+#
+# Recoger facts es lo más caro de casi cualquier play (un setup entero
+# por host). La caché de facts los guarda ENTRE ejecuciones: con
+# gathering=smart y un backend (jsonfile aquí; redis/memcached en flotas
+# grandes), la pasada siguiente arranca con los facts de la anterior y
+# no lanza setup. Como la gracia está justo en "entre ejecuciones", este
+# playbook lo DEMUESTRA con órdenes anidadas (una ansible-playbook por
+# escena, como el 28) y comprueba con asserts lo que quedó:
+#
+#   - SIN caché configurada, cada pasada recoge facts frescos: la hora
+#     de los facts avanza — y un set_fact cacheable NO sobrevive (el
+#     plugin de serie es 'memory': muere con el proceso).
+#   - Con jsonfile + smart, la 2ª pasada trae la hora CONGELADA de la
+#     1ª: la prueba de que no hubo setup. Y el sello cacheable de la 1ª
+#     aparece en ansible_facts de la 2ª antes de plantar nada.
+#   - OJO con eso mismo: la caché congela TODO, también lo que parece
+#     "de ahora" (ansible_date_time, IPs recién cambiadas, discos…). Si
+#     un play decide con un fact que caduca rápido, la caché le miente.
+#   - La caducidad manda: con fact_caching_timeout corto la caché
+#     expira, la pasada siguiente vuelve a recoger — y la expiración se
+#     lleva por delante también los sellos cacheables.
+#   - La caché es un fichero JSON EN CLARO con todos los facts del host
+#     (se inspecciona al final): trátala como material sensible — modo,
+#     dueño y nada de /tmp en producción.
+#
+# Toda la política va por variables de entorno (ANSIBLE_GATHERING,
+# ANSIBLE_CACHE_PLUGIN, ANSIBLE_CACHE_PLUGIN_CONNECTION/_TIMEOUT) para
+# no tocar el ansible.cfg del repo. En un proyecto real iría en el ini:
+#
+#   [defaults]
+#   gathering = smart
+#   fact_caching = jsonfile
+#   fact_caching_connection = /var/cache/ansible/facts
+#   fact_caching_timeout = 86400
+#
+# Ejecutar:
+#   ansible-playbook playbooks/29_cache_de_facts.yml
+#
+# (Como el 28: la verificación son sus asserts; las órdenes anidadas
+#  regeneran caché y registros en cada pasada.)
+# =============================================================================
+
+- name: Caché de facts — sin caché, con caché, caducada e inspeccionada
+  hosts: laboratorio
+  gather_facts: false
+  vars:
+    raiz_repo: "{{ playbook_dir }}/.."
+    carpeta_29: /tmp/ansible-lab-29
+    cache_29: /tmp/ansible-lab-29/cache
+    demo_29: playbooks/29_demo_cache.yml
+    # La política de caché de las escenas 2-4: smart + jsonfile. La
+    # caducidad (escena 3) solo cambia el TIMEOUT sobre esta misma base.
+    entorno_cache:
+      ANSIBLE_GATHERING: smart
+      ANSIBLE_CACHE_PLUGIN: jsonfile
+      ANSIBLE_CACHE_PLUGIN_CONNECTION: /tmp/ansible-lab-29/cache
+      ANSIBLE_CACHE_PLUGIN_TIMEOUT: "3600"
+  tasks:
+    - name: Empezar sin restos de ejecuciones anteriores
+      ansible.builtin.file:
+        path: "{{ carpeta_29 }}"
+        state: absent
+
+    - name: Crear la carpeta de trabajo
+      ansible.builtin.file:
+        path: "{{ carpeta_29 }}"
+        state: directory
+        mode: "0755"
+
+    # ------------------------------------------------------------------
+    # Escena 1 — sin caché: cada pasada recoge lo suyo y nada sobrevive.
+    # ------------------------------------------------------------------
+    - name: "Escena 1 — sin caché, dos pasadas seguidas"
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook
+          -e registro={{ carpeta_29 }}/sin_cache_{{ item }}.json
+          -e sello=v0
+          {{ demo_29 }}
+        chdir: "{{ raiz_repo }}"
+      loop: [a, b]
+      changed_when: true
+
+    # ------------------------------------------------------------------
+    # Escena 2 — jsonfile + smart: la 1ª puebla, la 2ª NO recoge.
+    # ------------------------------------------------------------------
+    - name: "Escena 2 — con caché, la pasada que la puebla y la que la disfruta"
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook
+          -e registro={{ carpeta_29 }}/con_cache_{{ item }}.json
+          -e sello=v1
+          {{ demo_29 }}
+        chdir: "{{ raiz_repo }}"
+      environment: "{{ entorno_cache }}"
+      loop: [a, b]
+      changed_when: true
+
+    # ------------------------------------------------------------------
+    # Escena 3 — caducidad: mismo backend, timeout de 2s y una espera
+    # de 3. La caché expira y la pasada vuelve a recoger de verdad.
+    # ------------------------------------------------------------------
+    - name: Dejar caducar la caché (timeout de la escena 3 = 2s)
+      ansible.builtin.pause:
+        seconds: 3
+
+    - name: "Escena 3 — caché caducada, la pasada re-recoge"
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook
+          -e registro={{ carpeta_29 }}/caducada.json
+          -e sello=v2
+          {{ demo_29 }}
+        chdir: "{{ raiz_repo }}"
+      environment: "{{ entorno_cache | combine({'ANSIBLE_CACHE_PLUGIN_TIMEOUT': '2'}) }}"
+      changed_when: true
+
+    # ------------------------------------------------------------------
+    # Leer los registros y comprobar la historia completa.
+    # ------------------------------------------------------------------
+    - name: Leer los registros de todas las escenas
+      ansible.builtin.slurp:
+        src: "{{ carpeta_29 }}/{{ item }}.json"
+      loop: [sin_cache_a, sin_cache_b, con_cache_a, con_cache_b, caducada]
+      register: registros_crudos
+
+    - name: Ordenar lo leído por escena
+      ansible.builtin.set_fact:
+        escenas_29: >-
+          {{ dict(registros_crudos.results
+                  | map(attribute='item')
+                  | zip(registros_crudos.results
+                        | map(attribute='content')
+                        | map('b64decode')
+                        | map('from_json'))) }}
+
+    - name: Sin caché, cada pasada recoge facts frescos y nada sobrevive
+      ansible.builtin.assert:
+        that:
+          - escenas_29.sin_cache_b.epoch_facts | int > escenas_29.sin_cache_a.epoch_facts | int
+          - escenas_29.sin_cache_a.sello_venia == 'NO'
+          - escenas_29.sin_cache_b.sello_venia == 'NO'
+        fail_msg: >-
+          Sin caché esperaba horas que avanzan y ningún sello heredado,
+          y hay: {{ escenas_29.sin_cache_a }} → {{ escenas_29.sin_cache_b }}.
+        success_msg: >-
+          Sin backend, el 'cacheable: true' no cachea nada: el plugin de
+          serie es memory y muere con el proceso. Cada pasada, su setup.
+
+    - name: Con jsonfile + smart, la segunda pasada vive de la caché
+      ansible.builtin.assert:
+        that:
+          - escenas_29.con_cache_b.epoch_facts == escenas_29.con_cache_a.epoch_facts
+          - escenas_29.con_cache_a.sello_venia == 'NO'
+          - escenas_29.con_cache_b.sello_venia == 'v1'
+        fail_msg: >-
+          Con caché esperaba la hora congelada de la pasada a y el sello
+          v1 heredado, y hay:
+          {{ escenas_29.con_cache_a }} → {{ escenas_29.con_cache_b }}.
+        success_msg: >-
+          La 2ª pasada no lanzó setup: sus facts (hora incluida) son los
+          de la 1ª, congelados — y el sello cacheable cruzó de proceso.
+          Lo bueno y lo peligroso de la caché son LA MISMA cosa.
+
+    - name: La caducidad re-recoge y se lleva también los sellos
+      ansible.builtin.assert:
+        that:
+          - escenas_29.caducada.epoch_facts | int > escenas_29.con_cache_a.epoch_facts | int
+          - escenas_29.caducada.sello_venia == 'NO'
+        fail_msg: >-
+          Con la caché caducada esperaba hora nueva y ningún sello, y
+          hay: {{ escenas_29.caducada }}.
+        success_msg: >-
+          Timeout vencido = caché inválida entera: setup fresco y el
+          sello v1 desapareció con ella. fact_caching_timeout es el
+          contrato de frescura de TODOS los facts, los tuyos incluidos.
+
+    # ------------------------------------------------------------------
+    # Escena 4 — la caché por dentro: un JSON en claro por host. El
+    # formato EXACTO es de cada versión de ansible-core (la 2.21 prefija
+    # el fichero con "s1_", envuelve los facts en un sobre __payload__ y
+    # etiqueta los valores con metadatos de confianza), así que el
+    # assert mira el TEXTO y no la estructura — que es además la
+    # moraleja: cualquiera que pueda leer el fichero lo ve TODO.
+    # ------------------------------------------------------------------
+    - name: Buscar los ficheros que dejó el backend jsonfile
+      ansible.builtin.find:
+        paths: "{{ cache_29 }}"
+      register: ficheros_cache
+
+    - name: Leer el fichero de caché del host
+      ansible.builtin.slurp:
+        src: "{{ (ficheros_cache.files | first).path }}"
+      register: cache_cruda
+
+    - name: La caché es un JSON en claro con todos los facts (sello incluido)
+      ansible.builtin.assert:
+        that:
+          - ficheros_cache.files | length == 1
+          - "'ansible_date_time' in cache_texto"
+          - "'v2' in cache_texto"
+        fail_msg: >-
+          Esperaba un único fichero de caché con los facts y el sello v2
+          legibles dentro, y hay {{ ficheros_cache.files | length }}
+          fichero(s) de {{ cache_texto | length }} caracteres.
+        success_msg: >-
+          Un fichero por host ({{ (ficheros_cache.files | first).path
+          | basename }}), {{ cache_texto | length }} caracteres de JSON
+          en claro: hardware, red, usuarios… y el sello v2 de la última
+          pasada, legible a simple vista. Cualquiera que lo lea sabe
+          TODO del host.
+      vars:
+        cache_texto: "{{ cache_cruda.content | b64decode }}"
+
+    - name: Moraleja
+      ansible.builtin.debug:
+        msg: >-
+          La caché de facts convierte el setup en algo que se paga una
+          vez por timeout, no una vez por play: oro con flotas grandes o
+          conexiones lentas. A cambio, TODOS los facts pasan a tener la
+          edad de la caché (la hora congelada lo delata) y el fichero
+          jsonfile cuenta la vida del host en claro. gathering=smart +
+          fact_caching=jsonfile + un timeout honesto, en un directorio
+          con permisos de verdad — y 'cacheable: true' solo para lo que
+          de verdad quieras arrastrar entre ejecuciones.
