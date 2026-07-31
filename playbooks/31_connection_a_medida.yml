@@ -1,0 +1,105 @@
+# =============================================================================
+# Playbook 31 — Connection plugin a medida: la octava extensión (EL TRANSPORTE)
+#
+# Todo lo que Ansible hace en un nodo pasa por TRES métodos del connection
+# plugin: exec_command (ejecutar), put_file (subir — así viajan los MÓDULOS)
+# y fetch_file (bajar). Quien implemente esos tres tiene un transporte
+# completo: ssh, winrm, community.docker.docker… y el nuestro.
+#
+#   - connection_plugins/lab_docker.py habla con LA MISMA flota del playbook
+#       7 por `docker exec` / `docker cp`. Compara los dos inventarios:
+#       inventario_flota.ini lleva puerto+clave+usuario; el nuevo
+#       inventario_flota_docker.ini no lleva NADA — la "credencial" es poder
+#       hablar con el daemon de Docker.
+#
+#   - LA LECCIÓN INCÓMODA: entrar por la puerta del daemon te hace ROOT en
+#       el contenedor sin presentar credencial alguna (por SSH la flota te
+#       hace usuario raso 'ansible'). Es el mismo motivo por el que montar
+#       docker.sock dentro de un contenedor es root regalado — la regla
+#       docker-socket-mount de dockerscope, vista desde el otro lado.
+#
+#   - LA TRAMPA: become aquí SOBRA (ya eres root) y además MUERDE — la
+#       imagen de la flota no trae sudo, así que `become: true` revienta en
+#       un transporte donde no hacía ninguna falta. Se provoca de verdad.
+#
+# Requiere la flota:  ./flota.sh up && ./flota.sh esperar
+# Ejecutar:
+#   ansible-playbook -i inventario_flota_docker.ini playbooks/31_connection_a_medida.yml
+#
+# (Idempotente: la marca se escribe con copy — 2ª pasada changed=0.)
+# =============================================================================
+
+- name: Connection plugin a medida (docker exec como transporte)
+  hosts: flota_docker
+  gather_facts: false
+
+  tasks:
+    # ── Escena 1: el transporte entero funciona ──────────────────────────
+    # ping no es un "ping" de red: es un MÓDULO que viaja por put_file al
+    # tmp remoto y se ejecuta con exec_command. Si esto responde pong, los
+    # tres métodos del plugin están vivos.
+    - name: El módulo ping viaja por el transporte nuevo
+      ansible.builtin.ping:
+
+    - name: Estamos de verdad en el transporte lab_docker
+      ansible.builtin.assert:
+        that:
+          - ansible_connection == 'lab_docker'
+        success_msg: "Transporte: {{ ansible_connection }} — sin puerto, sin clave, sin usuario."
+        fail_msg: Este play debía correr por lab_docker.
+
+    # ── Escena 2: root sin credenciales — la lección incómoda ────────────
+    # Por SSH (inventario_flota.ini) la flota te hace el usuario raso
+    # 'ansible'. Por la puerta del daemon eres root SIN presentar nada.
+    - name: Quién soy dentro del nodo por esta puerta
+      ansible.builtin.command: id -un
+      register: conexion_quien
+      changed_when: false
+
+    - name: Entrar por el daemon es ser root — nadie pidió credenciales
+      ansible.builtin.assert:
+        that:
+          - conexion_quien.stdout == 'root'
+        success_msg: >-
+          root sin credenciales: quién puede hablar con el daemon es la
+          superficie regalada (el porqué de docker-socket-mount).
+        fail_msg: "Esperaba root y soy {{ conexion_quien.stdout }}."
+
+    # ── Escena 3: put_file y fetch_file de ida y vuelta ──────────────────
+    - name: Subir una marca desde el controlador (viaja por put_file)
+      ansible.builtin.copy:
+        content: "marcado por lab_docker en {{ inventory_hostname }}\n"
+        dest: /opt/marca_lab_docker.txt
+        mode: "0644"
+
+    - name: Traerla de vuelta (viaja por fetch_file/exec)
+      ansible.builtin.slurp:
+        src: /opt/marca_lab_docker.txt
+      register: conexion_marca
+
+    - name: El viaje de ida y vuelta conserva el contenido byte a byte
+      ansible.builtin.assert:
+        that:
+          - (conexion_marca.content | b64decode) == ("marcado por lab_docker en " ~ inventory_hostname ~ "\n")
+        success_msg: put_file y fetch_file cierran el círculo del transporte.
+        fail_msg: La marca volvió distinta de como se fue.
+
+    # ── Escena 4 — LA TRAMPA: become sobra y muerde ──────────────────────
+    # Ya eres root, así que become no aporta nada; y la imagen de la flota
+    # no trae sudo, así que además revienta. Un transporte nuevo cambia
+    # QUIÉN eres al entrar — las suposiciones de become viajan mal.
+    - name: Provocar el error — become en un transporte que ya es root
+      ansible.builtin.command: id -un
+      become: true
+      ignore_errors: true
+      changed_when: false
+      register: conexion_become
+
+    - name: El become falló — y no hacía ninguna falta
+      ansible.builtin.assert:
+        that:
+          - conexion_become is failed
+        success_msg: >-
+          become muerde aquí (no hay sudo en la imagen) y sobra (ya eres
+          root): al cambiar de transporte, revisa tus suposiciones de become.
+        fail_msg: become funcionó — ¿la imagen de la flota trae sudo ahora?
