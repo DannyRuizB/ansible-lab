@@ -1,0 +1,148 @@
+# =============================================================================
+# Playbook 30 — Tests de Jinja a medida: el séptimo tipo de extensión
+#
+# El tour de extensiones (filtros 19, callback 22, lookup 23, action 24,
+# módulo 25, vars 26) se dio por cerrado con seis piezas… y había un colado:
+# los TESTS de Jinja también se extienden. La diferencia con un filtro es el
+# contrato: un filtro TRANSFORMA un valor, un test CLASIFICA — contesta una
+# pregunta de sí o no. Se usa con `is` / `is not` y, la gracia de verdad, es
+# lo que esperan select / reject / selectattr / rejectattr.
+#
+#   - test_plugins/ ....... la misma receta que los filtros del 19, un
+#       namespace más allá: una clase TestModule cuyo método tests()
+#       devuelve {nombre: función}; lo autodescubre la ruta `test_plugins`
+#       de ansible.cfg (añadida para esta lección).
+#
+#   - Los tres del lab (en test_plugins/lab_tests.py):
+#       es_ipv4_privada ........ ¿es una IPv4 RFC 1918? (solo RFC 1918: el
+#                                is_private de Python también dice sí a
+#                                loopback y link-local, que no es lo mismo)
+#       es_puerto_privilegiado . ¿puerto < 1024? (escuchar ahí pide root)
+#       es_mac_valida .......... ¿MAC de 6 octetos con : o - COHERENTES?
+#
+#   - LA TRAMPA: filtros y tests viven en NAMESPACES SEPARADOS. El error
+#       clásico es pasarle un filtro a select() — "si solo transforma…" — y
+#       Jinja para el play. Aquí se provoca el fallo DE VERDAD en las dos
+#       direcciones (to_snake como test, es_ipv4_privada como filtro) y se
+#       caza con asserts.
+#
+#   - El contrato de un buen test: bool DE VERDAD (la veracidad "funciona"
+#       hasta que un '' o un 0 se cuelan por una condición) y NUNCA una
+#       excepción — un test que revienta dentro de un select se lleva la
+#       plantilla entera; a "¿esta cosa rara es una IP privada?" se contesta
+#       False, no con un traceback.
+#
+# La verificación son sus asserts. Ejecutar:
+#   ansible-playbook playbooks/30_tests_a_medida.yml
+#
+# (Idempotente por construcción: solo evalúa expresiones y hace asserts, no
+#  escribe nada en disco.)
+# =============================================================================
+
+- name: Tests de Jinja a medida (Python)
+  hosts: laboratorio
+  gather_facts: false
+
+  vars:
+    # Una DMZ de juguete: cada servicio con su IP y su puerto de escucha.
+    servicios:
+      - { nombre: panel-interno, ip: 192.168.10.20, puerto: 8443 }
+      - { nombre: api-publica, ip: 203.0.113.7, puerto: 443 }
+      - { nombre: ssh-bastion, ip: 203.0.113.9, puerto: 22 }
+      - { nombre: cache-redis, ip: 10.0.5.11, puerto: 6379 }
+    # MACs "capturadas de un escaneo": dos bien, dos con trampa.
+    macs_capturadas:
+      - "aa:bb:cc:dd:ee:ff"
+      - "AA-BB-CC-DD-EE-01"
+      - "aa:bb-cc:dd:ee:02" # separadores MEZCLADOS: el backreference la tumba
+      - "aabb.ccdd.ee03" # notación Cisco: fuera del contrato del test
+
+  tasks:
+    # ── El uso natural: `is` / `is not` ──────────────────────────────────
+    - name: Un test se usa con `is` y contesta sí o no
+      ansible.builtin.assert:
+        that:
+          - "'192.168.1.10' is es_ipv4_privada"
+          - "'10.255.0.1' is es_ipv4_privada"
+          - "'8.8.8.8' is not es_ipv4_privada"
+          # 172.16/12 llega hasta 172.31.255.255 — la frontera clásica:
+          - "'172.31.9.9' is es_ipv4_privada"
+          - "'172.32.0.1' is not es_ipv4_privada"
+          - "22 is es_puerto_privilegiado"
+          - "1023 is es_puerto_privilegiado"
+          - "1024 is not es_puerto_privilegiado"
+          - "8443 is not es_puerto_privilegiado"
+        success_msg: Los tres tests contestan con `is` como cualquier built-in.
+        fail_msg: Algún test del lab no clasifica como se esperaba.
+
+    # ── La gracia real: select / selectattr ESPERAN tests ────────────────
+    # Con filtros esto pedía contorsiones (select('equalto', …) o un bucle);
+    # con un test propio la pregunta se escribe tal cual se piensa.
+    - name: Particionar la DMZ con selectattr/rejectattr y tests propios
+      vars:
+        ips_privadas: >-
+          {{ servicios | map(attribute='ip') | select('es_ipv4_privada') | list }}
+        # Servicios EXPUESTOS (IP pública) escuchando en puerto privilegiado:
+        # exactamente la pregunta que haría una revisión de seguridad.
+        expuestos_privilegiados: >-
+          {{ servicios
+             | rejectattr('ip', 'es_ipv4_privada')
+             | selectattr('puerto', 'es_puerto_privilegiado')
+             | map(attribute='nombre') | list }}
+      ansible.builtin.assert:
+        that:
+          - ips_privadas == ['192.168.10.20', '10.0.5.11']
+          - expuestos_privilegiados == ['api-publica', 'ssh-bastion']
+        success_msg: select/selectattr con tests propios — la pregunta, escrita tal cual.
+        fail_msg: La partición de la DMZ no salió como se esperaba.
+
+    - name: Separar las MAC bien formadas de las corruptas
+      vars:
+        macs_validas: "{{ macs_capturadas | select('es_mac_valida') | list }}"
+      ansible.builtin.assert:
+        that:
+          - macs_validas == ['aa:bb:cc:dd:ee:ff', 'AA-BB-CC-DD-EE-01']
+        success_msg: Separador coherente o nada — la MAC mezclada y la Cisco quedan fuera.
+        fail_msg: es_mac_valida dejó pasar (o tumbó) la MAC equivocada.
+
+    # ── LA TRAMPA: un filtro NO es un test ───────────────────────────────
+    # to_snake existe en este repo (playbook 19)… como FILTRO. Los dos
+    # namespaces están separados: select('to_snake') no lo encuentra y
+    # Jinja tumba la tarea. El fallo se provoca de verdad y se caza.
+    - name: Provocar el error — select('to_snake') con un filtro del 19
+      ansible.builtin.set_fact:
+        imposible: "{{ ['UnNombre'] | select('to_snake') | list }}"
+      ignore_errors: true
+      register: filtro_como_test
+
+    - name: Y el simétrico — un test tampoco funciona como filtro
+      ansible.builtin.set_fact:
+        imposible: "{{ '10.0.0.1' | es_ipv4_privada }}"
+      ignore_errors: true
+      register: test_como_filtro
+
+    - name: Ambas direcciones fallan — los namespaces están separados
+      ansible.builtin.assert:
+        that:
+          - filtro_como_test is failed
+          - test_como_filtro is failed
+          - "'to_snake' in (filtro_como_test.msg | default(''))"
+          - "'es_ipv4_privada' in (test_como_filtro.msg | default(''))"
+        success_msg: >-
+          select('to_snake') y '| es_ipv4_privada' revientan los dos:
+          filtro y test no se cruzan jamás.
+        fail_msg: Alguna dirección "funcionó" — los namespaces ya no son lo que eran.
+
+    # ── El contrato: bool de verdad y nunca una excepción ────────────────
+    - name: Tipos raros = False educado, nunca un traceback
+      ansible.builtin.assert:
+        that:
+          - "'no-soy-una-ip' is not es_ipv4_privada"
+          - "None is not es_ipv4_privada"
+          - "[] is not es_mac_valida"
+          - "'' is not es_puerto_privilegiado"
+          # int(True) == 1 haría de True un "puerto privilegiado": el test
+          # excluye bool a propósito — la veracidad accidental es la avería.
+          - "true is not es_puerto_privilegiado"
+        success_msg: El contrato se cumple — a una pregunta rara se contesta False.
+        fail_msg: Un tipo raro coló como True (o reventó el template).

@@ -202,6 +202,12 @@ jobs:
       - name: "Playbook 29 — caché de facts (asserts incluidos)"
         run: ansible-playbook playbooks/29_cache_de_facts.yml
 
+      # Tests de Jinja a medida: el séptimo tipo de extensión —
+      # select/selectattr con tests propios y la trampa de los namespaces
+      # (filtro-como-test y test-como-filtro) provocada de verdad.
+      - name: "Playbook 30 — tests a medida (asserts incluidos)"
+        run: ansible-playbook playbooks/30_tests_a_medida.yml
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \
