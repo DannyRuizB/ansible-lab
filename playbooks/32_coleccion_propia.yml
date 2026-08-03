@@ -1,0 +1,128 @@
+---
+# ============================================================================
+# Playbook 32 — Colección propia: galaxy.yml, build, install y FQCN
+# ============================================================================
+# Las 8 extensiones del tour (filtros, callbacks, lookups, actions, módulos,
+# vars, tests, connection) viven sueltas en carpetas *_plugins/ del proyecto.
+# Así se comparten con UN proyecto; una COLECCIÓN las empaqueta con nombre y
+# versión para compartirlas con cualquiera: eso es lo que hay en Galaxy y lo
+# que el requirements.yml del playbook 8 instala de internet — aquí se hace
+# el viaje entero en local: fuente → build (tarball) → install → consumo.
+#
+# La fuente vive en coleccion_lab/laboratorio/utilidades/ (galaxy.yml, un
+# módulo lab_eco y un filtro etiqueta_lab). Lo que se demuestra:
+#
+#   1. `ansible-galaxy collection build` empaqueta un tarball versionado.
+#   2. `install -p <ruta>` lo despliega como SNAPSHOT (MANIFEST.json + hash
+#      de cada fichero: editar la fuente después NO cambia lo instalado).
+#   3. El consumo va por FQCN: laboratorio.utilidades.lab_eco.
+#   4. LA TRAMPA GORDA: instalar no basta — si ANSIBLE_COLLECTIONS_PATH no
+#      apunta al sitio, "couldn't resolve module". El clásico "la instalé
+#      y no la ve" es casi siempre una ruta, no un bug.
+#   5. La palabra clave `collections:` acorta MÓDULOS, no filtros/tests
+#      (fijado provocando el fallo en el auxiliar 32_demo_coleccion.yml).
+#
+# Nota CI: build e install re-empaquetan siempre (--force) → este playbook
+# no entra en la pasada de idempotencia, como los demás de órdenes anidadas.
+
+- name: Ciclo completo de una colección propia
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    coleccion_fuente: "{{ playbook_dir }}/../coleccion_lab/laboratorio/utilidades"
+    coleccion_dist: "{{ playbook_dir }}/../entorno-prueba/coleccion_dist"
+    coleccion_ruta: "{{ playbook_dir }}/../entorno-prueba/collections"
+    coleccion_tarball: "{{ coleccion_dist }}/laboratorio-utilidades-1.0.0.tar.gz"
+
+  tasks:
+    - name: Preparar directorios de build e instalación
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ coleccion_dist }}"
+        - "{{ coleccion_ruta }}"
+
+    # ------------------------------------------------------------------
+    # 1. build: galaxy.yml manda — namespace, nombre y versión salen de ahí
+    # ------------------------------------------------------------------
+    - name: Construir el tarball de la colección
+      ansible.builtin.command:
+        cmd: ansible-galaxy collection build {{ coleccion_fuente }} --output-path {{ coleccion_dist }} --force
+      register: coleccion_build
+      changed_when: true
+
+    - name: El tarball existe y lleva la versión del galaxy.yml en el nombre
+      ansible.builtin.stat:
+        path: "{{ coleccion_tarball }}"
+      register: coleccion_tarball_stat
+      failed_when: not coleccion_tarball_stat.stat.exists
+
+    # ------------------------------------------------------------------
+    # 2. install: despliegue como snapshot bajo -p
+    # ------------------------------------------------------------------
+    - name: Instalar la colección en la ruta del laboratorio
+      ansible.builtin.command:
+        cmd: ansible-galaxy collection install {{ coleccion_tarball }} -p {{ coleccion_ruta }} --force
+      register: coleccion_install
+      changed_when: true
+
+    - name: La instalación es un snapshot con manifiesto firmado
+      ansible.builtin.stat:
+        path: "{{ coleccion_ruta }}/ansible_collections/laboratorio/utilidades/MANIFEST.json"
+      register: coleccion_manifest
+      failed_when: not coleccion_manifest.stat.exists
+
+    - name: Y ansible-galaxy la lista con su versión
+      ansible.builtin.command:
+        cmd: ansible-galaxy collection list -p {{ coleccion_ruta }}
+      register: coleccion_lista
+      changed_when: false
+      failed_when: "'laboratorio.utilidades' not in coleccion_lista.stdout or '1.0.0' not in coleccion_lista.stdout"
+
+    # ------------------------------------------------------------------
+    # 3+5. consumo por FQCN y la letra pequeña de collections:
+    #      (auxiliar anidado, patrón de los playbooks 16/22/26/28)
+    # ------------------------------------------------------------------
+    - name: El auxiliar consume la colección CON la ruta apuntada
+      ansible.builtin.command:
+        cmd: ansible-playbook playbooks/32_demo_coleccion.yml
+        chdir: "{{ playbook_dir }}/.."
+      environment:
+        ANSIBLE_COLLECTIONS_PATH: "{{ coleccion_ruta }}"
+      register: coleccion_consumo
+      changed_when: false
+
+    # ------------------------------------------------------------------
+    # 4. LA TRAMPA: la misma orden SIN la ruta no encuentra la colección
+    # ------------------------------------------------------------------
+    - name: Sin ANSIBLE_COLLECTIONS_PATH el mismo auxiliar tiene que fallar
+      ansible.builtin.command:
+        cmd: ansible-playbook playbooks/32_demo_coleccion.yml
+        chdir: "{{ playbook_dir }}/.."
+      environment:
+        # Una ruta vacía a propósito: la colección instalada queda invisible.
+        ANSIBLE_COLLECTIONS_PATH: "{{ playbook_dir }}/../entorno-prueba/collections_vacio"
+      register: coleccion_sin_ruta
+      changed_when: false
+      failed_when: coleccion_sin_ruta.rc == 0
+
+    - name: El fallo es el de resolución, no otro accidente
+      ansible.builtin.assert:
+        that:
+          - "'laboratorio.utilidades' in (coleccion_sin_ruta.stderr + coleccion_sin_ruta.stdout)"
+        success_msg: >-
+          Instalar no basta: sin apuntar ANSIBLE_COLLECTIONS_PATH a la ruta
+          del install, el FQCN no resuelve — el clásico "la instalé y no la
+          ve" es una ruta, no un bug.
+
+    - name: Moraleja
+      ansible.builtin.debug:
+        msg: >-
+          galaxy.yml define el FQCN; build empaqueta; install -p despliega un
+          snapshot versionado; el consumo va por nombre completo y con la
+          ruta bien apuntada. collections: acorta módulos — filtros y tests,
+          siempre por FQCN.

@@ -30,6 +30,18 @@ jobs:
       - name: Instalar las colecciones de Galaxy (requirements.yml)
         run: ansible-galaxy collection install -r requirements.yml
 
+      # El playbook 32 construye e instala esta colección él mismo, pero el
+      # syntax-check global (y ansible-lint) leen 32_demo_coleccion.yml antes
+      # de que nada se ejecute — y sin la colección disponible su FQCN no
+      # resuelve. Instalarla aquí es la misma lección desde el otro lado: un
+      # FQCN necesita la colección presente EN EL MOMENTO de resolverlo.
+      - name: Instalar la colección propia del laboratorio (playbook 32)
+        run: |
+          ansible-galaxy collection build coleccion_lab/laboratorio/utilidades \
+            --output-path /tmp/lab-coleccion --force
+          ansible-galaxy collection install \
+            /tmp/lab-coleccion/laboratorio-utilidades-1.0.0.tar.gz --force
+
       - name: Ejecutar ansible-lint
         run: ansible-lint
 
@@ -50,6 +62,18 @@ jobs:
 
       - name: Instalar las colecciones de Galaxy (requirements.yml)
         run: ansible-galaxy collection install -r requirements.yml
+
+      # El playbook 32 construye e instala esta colección él mismo, pero el
+      # syntax-check global (y ansible-lint) leen 32_demo_coleccion.yml antes
+      # de que nada se ejecute — y sin la colección disponible su FQCN no
+      # resuelve. Instalarla aquí es la misma lección desde el otro lado: un
+      # FQCN necesita la colección presente EN EL MOMENTO de resolverlo.
+      - name: Instalar la colección propia del laboratorio (playbook 32)
+        run: |
+          ansible-galaxy collection build coleccion_lab/laboratorio/utilidades \
+            --output-path /tmp/lab-coleccion --force
+          ansible-galaxy collection install \
+            /tmp/lab-coleccion/laboratorio-utilidades-1.0.0.tar.gz --force
 
       - name: Comprobar sintaxis de todos los playbooks
         run: |
@@ -207,6 +231,12 @@ jobs:
       # (filtro-como-test y test-como-filtro) provocada de verdad.
       - name: "Playbook 30 — tests a medida (asserts incluidos)"
         run: ansible-playbook playbooks/30_tests_a_medida.yml
+
+      # Colección propia: el ciclo entero galaxy.yml → build → install → FQCN,
+      # con la trampa de la ruta (ANSIBLE_COLLECTIONS_PATH) provocada de
+      # verdad. Sin pasada de idempotencia: build/install re-empaquetan.
+      - name: "Playbook 32 — colección propia (asserts incluidos)"
+        run: ansible-playbook playbooks/32_coleccion_propia.yml
 
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |

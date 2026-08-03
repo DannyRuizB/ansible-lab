@@ -1,0 +1,4 @@
+---
+# meta/runtime.yml — obligatorio en colecciones modernas: declara el rango
+# de ansible-core con el que la colección promete funcionar.
+requires_ansible: ">=2.15.0"

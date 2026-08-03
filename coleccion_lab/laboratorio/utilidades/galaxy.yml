@@ -1,0 +1,20 @@
+---
+# galaxy.yml — el DNI de una colección: sin este fichero no hay build.
+# namespace.name es la mitad izquierda de todo FQCN que viva aquí dentro:
+# laboratorio.utilidades.lab_eco, laboratorio.utilidades.etiqueta_lab...
+# La versión es semver y es lo que ansible-galaxy compara al reinstalar:
+# misma versión sin --force = "already installed, skipping".
+namespace: laboratorio
+name: utilidades
+version: 1.0.0
+readme: README.md
+authors:
+  - Danny Ruiz (laboratorio local)
+description: >-
+  Colección de ejemplo del laboratorio — un módulo y un filtro empaquetados
+  con galaxy.yml para aprender build, install y resolución FQCN.
+license:
+  - MIT
+tags:
+  - tools
+repository: https://github.com/DannyRuizB/ansible-lab
