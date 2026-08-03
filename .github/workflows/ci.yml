@@ -300,6 +300,11 @@ jobs:
       - name: "Playbook 27 — precedencia de variables (asserts incluidos)"
         run: ansible-playbook -i inventario_flota.ini -e prec_ganador=extra playbooks/27_precedencia_variables.yml
 
+      # Connection plugin: la MISMA flota por docker exec/cp en vez de SSH —
+      # root sin credenciales (la lección) y become que muerde (la trampa).
+      - name: "Playbook 31 — connection plugin a medida (asserts incluidos)"
+        run: ansible-playbook -i inventario_flota_docker.ini playbooks/31_connection_a_medida.yml
+
       - name: Apagar la flota
         if: always()
         run: ./flota.sh down
