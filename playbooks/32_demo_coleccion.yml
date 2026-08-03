@@ -1,0 +1,72 @@
+---
+# Auxiliar del playbook 32 (patrón de orden anidada de los playbooks 16/22/
+# 26/28): consume la colección laboratorio.utilidades YA INSTALADA. Quien lo
+# invoca decide dónde buscar colecciones vía ANSIBLE_COLLECTIONS_PATH — esa
+# es justo la lección: instalar no basta, hay que APUNTAR al sitio.
+
+- name: Consumir la colección por FQCN (la vía que siempre funciona)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: El módulo responde por su nombre completo
+      laboratorio.utilidades.lab_eco:
+        msg: hola desde el playbook 32
+      register: demo_32_eco
+
+    - name: El eco vuelve etiquetado por la colección
+      ansible.builtin.assert:
+        that:
+          - demo_32_eco.eco == '[laboratorio.utilidades] hola desde el playbook 32'
+        success_msg: "FQCN de módulo resuelto: {{ demo_32_eco.eco }}"
+
+    - name: El filtro también responde por FQCN
+      ansible.builtin.assert:
+        that:
+          - "'hola' | laboratorio.utilidades.etiqueta_lab == '[laboratorio] hola'"
+          - "'hola' | laboratorio.utilidades.etiqueta_lab('flota') == '[flota] hola'"
+        success_msg: "FQCN de filtro resuelto (con y sin argumento)"
+
+- name: La palabra clave collections acorta módulos... y SOLO módulos # noqa: fqcn[keyword]
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  # collections: es una lista de búsqueda para nombres CORTOS de módulos,
+  # actions y roles. NO aplica a filtros, tests ni lookups: esos siempre
+  # exigen FQCN. Las dos tareas siguientes fijan ambos lados del contrato.
+  #
+  # El noqa del `- name:` de arriba es deliberado y es parte de la lección:
+  # ansible-lint desaconseja esta palabra clave (fqcn[keyword]) precisamente
+  # porque esconde de dónde sale cada nombre — pero para DEMOSTRAR qué
+  # acorta y qué no, hay que usarla. Y OJO: el noqa de una regla de PLAY va
+  # en la línea del play (su `- name:`), no en la clave que la dispara.
+  collections:
+    - laboratorio.utilidades
+
+  tasks:
+    - name: Con collections el módulo funciona por su nombre corto
+      lab_eco: # noqa: fqcn[action] — el nombre corto ES la demostración
+        msg: nombre corto
+      register: demo_32_corto
+
+    - name: La tarea corta llegó a la colección de verdad
+      ansible.builtin.assert:
+        that:
+          - demo_32_corto.eco == '[laboratorio.utilidades] nombre corto'
+        success_msg: "collections: resolvió lab_eco → laboratorio.utilidades"
+
+    - name: El filtro por nombre corto revienta AUNQUE collections esté puesto
+      ansible.builtin.debug:
+        msg: "{{ 'hola' | etiqueta_lab }}"
+      ignore_errors: true
+      register: demo_32_filtro_corto
+
+    - name: La trampa queda fijada — filtros y tests siempre por FQCN
+      ansible.builtin.assert:
+        that:
+          - demo_32_filtro_corto is failed
+          - "'etiqueta_lab' in (demo_32_filtro_corto.msg | default(''))"
+        success_msg: >-
+          collections: no alcanza a los filtros — 'etiqueta_lab' a secas no
+          existe; laboratorio.utilidades.etiqueta_lab sí.

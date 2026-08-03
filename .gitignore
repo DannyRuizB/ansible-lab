@@ -12,3 +12,7 @@ entorno-prueba/
 # Python bytecode (los plugins generan __pycache__ al ejecutarse)
 __pycache__/
 *.pyc
+
+# Artefactos del build/install de la colección propia (playbook 32) — se
+# recrean al ejecutarlo; la FUENTE vive en coleccion_lab/ y sí se versiona.
+/tmp-coleccion/
