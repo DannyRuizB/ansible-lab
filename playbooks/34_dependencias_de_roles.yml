@@ -1,0 +1,361 @@
+---
+# =============================================================================
+# Playbook 34 — Dependencias de roles (meta/main.yml) a fondo
+#
+# Un rol puede declarar en su `meta/main.yml` de qué OTROS roles depende, y
+# Ansible los ejecuta antes que a él. Suena a `include_role` con otra
+# sintaxis; no lo es. Tiene su propia resolución, su propio orden y —lo que
+# muerde— su propia DEDUPLICACIÓN, que no se parece a nada más en Ansible:
+#
+#   dependencies (meta)                 include_role / import_role (tasks)
+#   ─────────────────────────────       ─────────────────────────────────────
+#   se resuelven al CARGAR la play      se ejecutan al llegar la tarea
+#   corren ANTES del rol que las pide   corren donde está escrito
+#   se DEDUPLICAN por firma             nunca deduplican: N veces = N veces
+#   transitivas (arrastran las suyas)   solo lo que pides
+#   heredan los tags del rol padre      include_tasks NO baja su tag (pb 28)
+#
+# Las piezas: cinco roles de laboratorio cuyo único trabajo es dejar constancia
+# de haberse ejecutado —
+#   roles/dep_sello       (la dependencia compartida; allow_duplicates AUSENTE)
+#   roles/dep_sello_dup   (idéntico, pero con allow_duplicates: true)
+#   roles/dep_alfa        (depende de dep_sello)
+#   roles/dep_beta        (depende de dep_sello — la MISMA)
+#   roles/dep_cadena      (depende de dep_alfa → dependencia transitiva)
+#
+# EL MEDIDOR, y la primera lección (que me costó una medición falsa):
+# el sello hace un APPEND REAL con `shell` y `>>`, no `lineinfile`. lineinfile
+# es idempotente — si la línea ya está no la reescribe — así que contaba 1
+# donde el rol se había ejecutado 2 veces y "demostraba" una deduplicación
+# que no existía. **Un medidor idempotente no puede contar invocaciones.**
+#
+# Las siete escenas van cada una en su play: `pre_tasks` limpia el testigo,
+# `roles:` ejecuta lo que toca, y `tasks:` cuenta y asserta — el orden de las
+# secciones de una play (pre_tasks → roles → tasks) es lo que lo permite.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/34_dependencias_de_roles.yml
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Escena 1 — El orden: la dependencia va DELANTE
+# ---------------------------------------------------------------------------
+- name: "34.1 — Una dependencia se ejecuta antes que el rol que la declara"
+  hosts: laboratorio
+  gather_facts: false
+  vars:
+    sellos: "{{ playbook_dir }}/../informes/sellos_dependencias.txt"
+
+  pre_tasks:
+    - name: Asegurar la carpeta de informes
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/../informes"
+        state: directory
+        mode: "0755"
+
+    - name: Empezar con el testigo en blanco
+      ansible.builtin.file:
+        path: "{{ sellos }}"
+        state: absent
+
+  roles:
+    - dep_alfa
+
+  tasks:
+    - name: Leer el testigo
+      ansible.builtin.slurp:
+        src: "{{ sellos }}"
+      register: t1
+
+    - name: El sello (dependencia) quedó registrado ANTES que alfa
+      vars:
+        lineas: "{{ (t1.content | b64decode).strip().split('\n') }}"
+      ansible.builtin.assert:
+        that:
+          - lineas | length == 2
+          - lineas[0] is search('dep_sello')
+          - lineas[1] == 'dep_alfa'
+        success_msg: >-
+          Orden correcto: dep_sello → dep_alfa. La dependencia no es "algo que
+          el rol incluye por dentro": corre completa antes de que empiece él.
+        fail_msg: "Orden inesperado: {{ lineas }}"
+
+# ---------------------------------------------------------------------------
+# Escena 2 — La deduplicación silenciosa: dos roles, UNA ejecución
+# ---------------------------------------------------------------------------
+- name: "34.2 — Dos roles declaran la misma dependencia: se ejecuta una vez"
+  hosts: laboratorio
+  gather_facts: false
+  vars:
+    sellos: "{{ playbook_dir }}/../informes/sellos_dependencias.txt"
+
+  pre_tasks:
+    - name: Empezar con el testigo en blanco
+      ansible.builtin.file:
+        path: "{{ sellos }}"
+        state: absent
+
+  roles:
+    - dep_alfa
+    - dep_beta
+
+  tasks:
+    - name: Leer el testigo
+      ansible.builtin.slurp:
+        src: "{{ sellos }}"
+      register: t2
+
+    - name: Comprobar que dep_sello aparece UNA sola vez pese a los dos roles
+      vars:
+        lineas: "{{ (t2.content | b64decode).strip().split('\n') }}"
+        sellos_contados: "{{ lineas | select('search', 'dep_sello') | list | length }}"
+      ansible.builtin.assert:
+        that:
+          - sellos_contados | int == 1
+          - lineas | length == 3
+        success_msg: >-
+          Una sola ejecución de dep_sello para dos roles que la declaran. Esto
+          es lo que hace útil una dependencia compartida (un paquete común, un
+          usuario de servicio): no se repite. Y es lo que sorprende cuando
+          esperabas que se repitiera.
+        fail_msg: "Se esperaba 1 sello y 3 líneas; salió {{ lineas }}"
+
+# ---------------------------------------------------------------------------
+# Escena 3 — La firma incluye los PARÁMETROS
+# ---------------------------------------------------------------------------
+- name: "34.3 — La misma dependencia con parámetros distintos corre dos veces"
+  hosts: laboratorio
+  gather_facts: false
+  vars:
+    sellos: "{{ playbook_dir }}/../informes/sellos_dependencias.txt"
+
+  pre_tasks:
+    - name: Empezar con el testigo en blanco
+      ansible.builtin.file:
+        path: "{{ sellos }}"
+        state: absent
+
+  # Aquí se declara la dependencia a mano (no vía meta) para poder darle a
+  # cada declaración un parámetro distinto. Lo que Ansible deduplica es la
+  # pareja (rol, parámetros) — no el nombre del rol.
+  roles:
+    - role: dep_sello
+      dep_sello_etiqueta: para-alfa
+    - role: dep_sello
+      dep_sello_etiqueta: para-beta
+    - role: dep_sello
+      dep_sello_etiqueta: para-alfa
+
+  tasks:
+    - name: Leer el testigo
+      ansible.builtin.slurp:
+        src: "{{ sellos }}"
+      register: t3
+
+    - name: Dos etiquetas distintas = dos ejecuciones; la repetida no vuelve
+      vars:
+        lineas: "{{ (t3.content | b64decode).strip().split('\n') }}"
+      ansible.builtin.assert:
+        that:
+          - lineas | length == 2
+          - lineas[0] is search('para-alfa')
+          - lineas[1] is search('para-beta')
+        success_msg: >-
+          allow_duplicates sigue en false y aun así corrió dos veces: la firma
+          de deduplicación es (rol + parámetros). La tercera declaración,
+          idéntica a la primera, no añadió nada.
+        fail_msg: "Se esperaban para-alfa y para-beta; salió {{ lineas }}"
+
+# ---------------------------------------------------------------------------
+# Escena 4 — allow_duplicates: true
+# ---------------------------------------------------------------------------
+- name: "34.4 — allow_duplicates: true repite con parámetros idénticos"
+  hosts: laboratorio
+  gather_facts: false
+  vars:
+    sellos: "{{ playbook_dir }}/../informes/sellos_dependencias.txt"
+
+  pre_tasks:
+    - name: Empezar con el testigo en blanco
+      ansible.builtin.file:
+        path: "{{ sellos }}"
+        state: absent
+
+  roles:
+    - dep_sello_dup
+    - dep_sello_dup
+
+  tasks:
+    - name: Leer el testigo
+      ansible.builtin.slurp:
+        src: "{{ sellos }}"
+      register: t4
+
+    - name: El gemelo con allow_duplicates sí se repite
+      vars:
+        lineas: "{{ (t4.content | b64decode).strip().split('\n') }}"
+      ansible.builtin.assert:
+        that:
+          - lineas | length == 2
+          - lineas[0] == lineas[1]
+        success_msg: >-
+          Dos ejecuciones con parámetros idénticos. Es el patrón para una
+          dependencia que representa una ACCIÓN repetible ("despliega otra
+          instancia"), no un estado idempotente ("el paquete está puesto").
+          allow_duplicates se lee del meta al cargar: no se decide en runtime.
+        fail_msg: "Se esperaban 2 líneas iguales; salió {{ lineas }}"
+
+# ---------------------------------------------------------------------------
+# Escena 5 — include_role / import_role NUNCA deduplican
+# ---------------------------------------------------------------------------
+- name: "34.5 — Por la puerta de tasks no hay deduplicación ninguna"
+  hosts: laboratorio
+  gather_facts: false
+  vars:
+    sellos: "{{ playbook_dir }}/../informes/sellos_dependencias.txt"
+
+  tasks:
+    - name: Empezar con el testigo en blanco
+      ansible.builtin.file:
+        path: "{{ sellos }}"
+        state: absent
+
+    - name: Incluir el MISMO rol dos veces con include_role
+      ansible.builtin.include_role:
+        name: dep_sello
+      loop: [1, 2]
+
+    - name: Importar el MISMO rol con import_role
+      ansible.builtin.import_role:
+        name: dep_sello
+
+    - name: Importarlo otra vez
+      ansible.builtin.import_role:
+        name: dep_sello
+
+    - name: Leer el testigo
+      ansible.builtin.slurp:
+        src: "{{ sellos }}"
+      register: t5
+
+    - name: Cuatro invocaciones, cuatro ejecuciones
+      vars:
+        lineas: "{{ (t5.content | b64decode).strip().split('\n') }}"
+      ansible.builtin.assert:
+        that:
+          - lineas | length == 4
+        success_msg: >-
+          include_role e import_role ejecutan lo que les pides, tantas veces
+          como se lo pidas: la deduplicación es EXCLUSIVA del mecanismo de
+          dependencias. Si necesitas control explícito del número de veces,
+          la puerta de tasks es la previsible.
+        fail_msg: "Se esperaban 4 ejecuciones; salieron {{ lineas | length }}"
+
+# ---------------------------------------------------------------------------
+# Escena 6 — Los tags del rol padre BAJAN a la dependencia
+# ---------------------------------------------------------------------------
+- name: "34.6 — Un tag puesto en el rol alcanza también a sus dependencias"
+  hosts: laboratorio
+  gather_facts: false
+  vars:
+    sellos: "{{ playbook_dir }}/../informes/sellos_dependencias.txt"
+    raiz_repo: "{{ playbook_dir }}/.."
+
+  tasks:
+    # El efecto de una selección por tags solo se puede medir desde FUERA de
+    # la ejecución que la aplica: el auxiliar corre con --tags solo_alfa y
+    # esta play lee lo que dejó (patrón de órdenes anidadas del 28 y el 29).
+    - name: Ejecutar el auxiliar pidiendo SOLO el tag de alfa
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook --tags solo_alfa
+          -e dep_sello_fichero={{ sellos }}
+          playbooks/34_demo_tags.yml
+        chdir: "{{ raiz_repo }}"
+      changed_when: true
+
+    - name: Leer el testigo
+      ansible.builtin.slurp:
+        src: "{{ sellos }}"
+      register: t6
+
+    - name: Con --tags solo_alfa, la dependencia de alfa corre igualmente
+      vars:
+        lineas: "{{ (t6.content | b64decode).strip().split('\n') }}"
+      ansible.builtin.assert:
+        that:
+          - lineas | length == 2
+          - lineas[0] is search('dep_sello')
+          - lineas[1] == 'dep_alfa'
+        success_msg: >-
+          El tag del rol se propaga a sus dependencias: pedido solo `solo_alfa`,
+          dep_sello corre aunque no lleve tag propio — lo arrastra dep_alfa — y
+          de dep_beta no queda nada. **Contraste con el playbook 28**: el tag de
+          un include_tasks NO baja a las tareas de dentro. Dos mecanismos, dos
+          reglas opuestas; por eso no se puede "saltar" una dependencia
+          etiquetando solo al padre.
+        fail_msg: "Con --tags solo_alfa se esperaba sello+alfa; salió {{ lineas }}"
+
+# ---------------------------------------------------------------------------
+# Escena 7 — LA TRAMPA: un rol listado que NO se ejecuta
+# ---------------------------------------------------------------------------
+- name: "34.7 — Listar un rol no garantiza que corra: puede haber corrido ya"
+  hosts: laboratorio
+  gather_facts: false
+  vars:
+    sellos: "{{ playbook_dir }}/../informes/sellos_dependencias.txt"
+
+  pre_tasks:
+    - name: Empezar con el testigo en blanco
+      ansible.builtin.file:
+        path: "{{ sellos }}"
+        state: absent
+
+  # dep_cadena depende de dep_alfa, que depende de dep_sello. Y DESPUÉS la
+  # play pide dep_alfa explícitamente... que ya corrió como dependencia.
+  roles:
+    - dep_cadena
+    - dep_alfa
+
+  tasks:
+    - name: Leer el testigo
+      ansible.builtin.slurp:
+        src: "{{ sellos }}"
+      register: t7
+
+    - name: La cadena corre una vez y el dep_alfa explícito se queda fuera
+      vars:
+        lineas: "{{ (t7.content | b64decode).strip().split('\n') }}"
+        alfas: "{{ lineas | select('equalto', 'dep_alfa') | list | length }}"
+      ansible.builtin.assert:
+        that:
+          - lineas | length == 3
+          - lineas[0] is search('dep_sello')
+          - lineas[1] == 'dep_alfa'
+          - lineas[2] == 'dep_cadena'
+          - alfas | int == 1
+        success_msg: >-
+          Tres ejecuciones, no cuatro: dep_alfa aparece UNA vez. La play lo
+          lista explícitamente y no se ejecuta, porque la misma firma ya había
+          corrido como dependencia transitiva de dep_cadena — y Ansible no
+          avisa de nada. Es la cara incómoda de la escena 2: la deduplicación
+          no distingue "lo pedí yo" de "lo arrastró otro". Si necesitas que
+          corra ahí, allow_duplicates o include_role (escenas 4 y 5).
+        fail_msg: "Se esperaban sello+alfa+cadena con un solo alfa; salió {{ lineas }}"
+
+    - name: Retirar el testigo (el playbook no deja rastro)
+      ansible.builtin.file:
+        path: "{{ sellos }}"
+        state: absent
+
+    - name: Resumen
+      ansible.builtin.debug:
+        msg:
+          - "1. La dependencia corre ANTES del rol que la declara (y es transitiva)."
+          - "2. Dos roles, la misma dependencia: se ejecuta UNA vez."
+          - "3. La firma de deduplicación es (rol + parámetros), no el nombre."
+          - "4. allow_duplicates: true la repite con parámetros idénticos."
+          - "5. include_role / import_role no deduplican nunca."
+          - "6. El tag del rol SÍ baja a sus dependencias (al revés que include_tasks)."
+          - "7. Un rol listado en la play puede NO correr si ya corrió como dependencia."
+          - "Y del arnés: un medidor idempotente (lineinfile) no puede contar invocaciones."

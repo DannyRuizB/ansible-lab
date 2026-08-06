@@ -1,0 +1,8 @@
+---
+# Las dependencias son TRANSITIVAS: esto arrastra dep_alfa, que arrastra
+# dep_sello. El orden de ejecución es el de la profundidad: sello → alfa →
+# cadena. Y de aquí sale la trampa de la escena 7: si la play lista
+# `dep_cadena` y DESPUÉS `dep_alfa`, ese dep_alfa explícito ya no se
+# ejecuta — ya corrió como dependencia.
+dependencies:
+  - role: dep_alfa

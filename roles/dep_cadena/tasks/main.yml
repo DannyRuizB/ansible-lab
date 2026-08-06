@@ -1,0 +1,5 @@
+---
+- name: Cadena hace su trabajo (la última de sello → alfa → cadena)
+  ansible.builtin.shell:
+    cmd: 'echo "dep_cadena" >> {{ dep_sello_fichero }}'
+  changed_when: false

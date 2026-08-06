@@ -1,0 +1,11 @@
+---
+# Gemelo de dep_sello con la ÚNICA diferencia que importa: su meta declara
+# allow_duplicates: true. Hacen falta dos roles porque allow_duplicates se
+# lee del meta en tiempo de carga — no es algo que se pueda decidir en
+# runtime con una variable.
+- name: Registrar una invocación real del rol dependencia (permite duplicados)
+  ansible.builtin.shell:
+    cmd: >-
+      echo "{{ dep_sello_dup_quien }} etiqueta={{ dep_sello_dup_etiqueta }}"
+      >> {{ dep_sello_dup_fichero }}
+  changed_when: false

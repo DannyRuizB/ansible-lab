@@ -1,0 +1,4 @@
+---
+dep_sello_dup_quien: dep_sello_dup
+dep_sello_dup_etiqueta: sin-parametro
+dep_sello_dup_fichero: "{{ playbook_dir }}/../informes/sellos_dependencias.txt"
