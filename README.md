@@ -8,7 +8,7 @@
 Laboratorio de aprendizaje de **Ansible** que funciona **100% en local**, en dos niveles:
 
 - **Playbooks 1-6, 8-12, 15-19, 22, 25-26, 28-30 y 32**: el "servidor" gestionado es la propia máquina (`localhost` con `ansible_connection=local`). Sin SSH, sin servidores remotos, sin permisos de administrador — todo ocurre dentro del directorio del proyecto.
-- **Playbooks 7, 13, 14, 20, 21, 23, 24, 27 y 31 (opcionales)**: una "flota" de 3 contenedores Docker locales gestionados **por SSH real** (y en el 31, por un **connection plugin propio sobre `docker exec`**), para practicar inventarios multi-host, estrategias de ejecución, delegación, inventario dinámico, inventario por capas, lookups, action y connection plugins a medida, y la precedencia de variables. Requiere Docker, pero sigue siendo local: los contenedores solo escuchan en `127.0.0.1`.
+- **Playbooks 7, 13, 14, 20, 21, 23, 24, 27, 31 y 33 (opcionales)**: una "flota" de 3 contenedores Docker locales gestionados **por SSH real** (y en el 31, por un **connection plugin propio sobre `docker exec`**), para practicar inventarios multi-host, estrategias de ejecución, delegación, inventario dinámico, inventario por capas, lookups, action, connection e inventory plugins a medida, y la precedencia de variables. Requiere Docker, pero sigue siendo local: los contenedores solo escuchan en `127.0.0.1`.
 
 Forma parte de mi formación en automatización/DevOps con perfil de administración de sistemas (ASIR).
 
@@ -52,6 +52,7 @@ Forma parte de mi formación en automatización/DevOps con perfil de administrac
 | `playbooks/30_tests_a_medida.yml` | **Tests de Jinja a medida: el séptimo tipo de extensión** — el tour (19, 22, 23, 24, 25, 26) se dio por cerrado con seis piezas… y había un colado: los tests también se extienden. El contrato es la diferencia: un filtro TRANSFORMA, un test CLASIFICA (contesta sí o no) — se usa con `is` / `is not` y es lo que **esperan `select` / `reject` / `selectattr` / `rejectattr`**. `test_plugins/lab_tests.py` (clase `TestModule`, método `tests()`, autodescubierto por la ruta `test_plugins` añadida a `ansible.cfg`) trae tres del gremio: **`es_ipv4_privada`** (RFC 1918 estricto — el `is_private` de Python también dice sí a loopback y link-local, que no es lo mismo), **`es_puerto_privilegiado`** (< 1024) y **`es_mac_valida`** (6 octetos, separador COHERENTE: la MAC con `:` y `-` mezclados cae por el backreference). Con ellos la revisión de seguridad se escribe tal cual se piensa: `rejectattr('ip', 'es_ipv4_privada') \| selectattr('puerto', 'es_puerto_privilegiado')`. **La trampa que demuestra**: filtros y tests viven en NAMESPACES SEPARADOS — `select('to_snake')` (el filtro del 19) y `'x' \| es_ipv4_privada` se provocan DE VERDAD y revientan los dos, cazados con asserts. Y el contrato del buen test: **bool de verdad y nunca una excepción** (a "¿esta cosa rara es una IP?" se contesta `False`; `int(True) == 1` haría de `True` un puerto privilegiado — excluido a propósito). No toca disco: idempotente por construcción |
 | `playbooks/31_connection_a_medida.yml` | **Connection plugin a medida: la octava extensión — EL TRANSPORTE** (sobre la flota). Todo lo que Ansible hace en un nodo pasa por TRES métodos del connection plugin: `exec_command` (ejecutar), `put_file` (subir — **así viajan los MÓDULOS**: el .py va al tmp remoto y se ejecuta) y `fetch_file` (bajar); quien implemente esos tres tiene un transporte completo (ssh, winrm, `community.docker.docker`… y el nuestro). `connection_plugins/lab_docker.py` habla con **la misma flota del 7** por `docker exec`/`docker cp`: compara los inventarios — `inventario_flota.ini` lleva puerto+clave+usuario, `inventario_flota_docker.ini` **no lleva nada**, porque la "credencial" es poder hablar con el daemon. **LA LECCIÓN INCÓMODA**: por esa puerta eres **root sin presentar credencial alguna** (por SSH la flota te hace usuario raso) — el mismo motivo por el que montar `docker.sock` en un contenedor es root regalado. **LA TRAMPA, provocada de verdad**: `become` aquí SOBRA (ya eres root) y además MUERDE (la imagen no trae sudo) — al cambiar de transporte, revisa tus suposiciones de become. Ida y vuelta byte a byte por put/fetch, `changed=0` en la 2ª pasada |
 | `playbooks/32_coleccion_propia.yml` | **Colección propia: `galaxy.yml`, build, install y FQCN**. Las 8 extensiones del tour viven sueltas en carpetas `*_plugins/` — se comparten con UN proyecto; una **colección** las empaqueta con nombre y versión para compartirlas con cualquiera (es lo que hay en Galaxy y lo que instala el `requirements.yml` del 8). Aquí se hace el viaje entero **en local**: fuente (`coleccion_lab/laboratorio/utilidades`, con un módulo `lab_eco` y un filtro `etiqueta_lab`) → `ansible-galaxy collection build` (tarball versionado; `galaxy.yml` define el FQCN) → `install -p` (despliegue como **snapshot**: `MANIFEST.json` con hash de cada fichero, así que editar la fuente después NO cambia lo instalado) → consumo por `laboratorio.utilidades.lab_eco`. **LA TRAMPA GORDA, provocada de verdad**: instalar **no basta** — con `ANSIBLE_COLLECTIONS_PATH` apuntando a otro sitio, el mismo playbook falla con "couldn't resolve module"; el clásico *"la instalé y no la ve"* es casi siempre una ruta, no un bug. **Y la letra pequeña**: la palabra clave `collections:` acorta **módulos** (y actions y roles), pero **NO filtros ni tests** — el auxiliar lo fija haciendo reventar `| etiqueta_lab` a secas con `collections:` puesto |
+| `playbooks/33_inventory_plugin_a_medida.yml` | **Inventory plugin a medida: la novena extensión — LA FUENTE** (sobre la flota). El arco de tres playbooks se cierra: el 20 descubrió la flota con un **script** (ejecutable + contrato JSON), el 21 apiló el plugin `constructed` de serie, y este escribe el plugin **de verdad** — la misma clase de la que están hechos `aws_ec2` o `community.docker.docker_containers`. `inventory_plugins/lab_flota.py` pregunta a Docker y monta el inventario con la **API** (`add_group`/`add_host`/`set_variable`, sin contrato `--list`/`_meta` que cumplir), se activa por la clave `plugin:` de un YAML de configuración (el despachador que lee `auto`) y declara opciones en `DOCUMENTATION` + `get_option()`. **LA TRAMPA DOBLE, provocada de verdad**: `verify_file` es un portero — el MISMO contenido con un nombre que el plugin no acepta muere en *"could not be verified"*, y la fuente descartada es **WARNING + rc 0 + inventario vacío** (la letra pequeña del 21; por eso `aws_ec2` exige `*.aws_ec2.yml`); y SIN la clave `plugin:`, el YAML bien nombrado **ni siquiera avisa** — el plugin `yaml` se lo queda como inventario vacío legal y el *"Unable to parse"* nunca llega. **Lección extra cazada al probar**: los hosts de `add_host` no traen `inventory_dir` (el `{{ inventory_dir }}` heredado del INI llegaba LITERAL al ssh) — un plugin resuelve las rutas él mismo en `parse()`. Verificación doble como el 20: contrato por fuera (y **script vs plugin: la misma flota por las dos puertas**, pinneado con assert) y **SSH real** a lo descubierto |
 
 ```
 ansible-lab/
@@ -63,6 +64,7 @@ ansible-lab/
 ├── inventario_flota.ini                 # inventario multi-host (grupos web/db)
 ├── inventario_dinamico.py               # inventario dinámico: descubre la flota en Docker (playbook 20)
 ├── inventario_construido.yml            # capa constructed: grupos/vars derivados (playbook 21)
+├── inventario_flota_plugin.yml          # configuración del inventory plugin lab_flota (playbook 33)
 ├── flota.sh                             # levantar/apagar los 3 nodos Docker
 ├── multihost/Dockerfile                 # imagen de nodo: Debian + sshd + python3
 ├── group_vars/
@@ -93,7 +95,7 @@ ansible-lab/
 │   ├── 18_vault_a_fondo.yml
 │   ├── 18_demo_vault_ids.yml            # auxiliar del 18: consumo anidado de vaults
 │   ├── 19_filtros_a_medida.yml
-│   ├── ...                              # 20-32: un playbook por lección (la tabla de arriba los lista todos)
+│   ├── ...                              # 20-33: un playbook por lección (la tabla de arriba los lista todos)
 │   └── tasks/                           # ficheros de tareas de los playbooks 12 y 28
 ├── filter_plugins/
 │   └── lab_filters.py                   # filtros Jinja a medida en Python (playbook 19)
@@ -112,6 +114,8 @@ ansible-lab/
 ├── connection_plugins/
 │   └── lab_docker.py                    # connection plugin: docker exec como transporte (playbook 31)
 ├── coleccion_lab/laboratorio/utilidades/ # colección propia: galaxy.yml + módulo + filtro (playbook 32)
+├── inventory_plugins/
+│   └── lab_flota.py                     # inventory plugin: la fuente como plugin, con verify_file (playbook 33)
 ├── vars/
 │   ├── cmdb_lab.yml                     # mini-CMDB que lee lab_cmdb (playbook 26)
 │   └── secretos.yml                     # secretos CIFRADOS con ansible-vault
@@ -177,6 +181,7 @@ ansible-playbook -i inventario_flota.ini playbooks/13_estrategias_ejecucion.yml
 ansible-playbook -i inventario_flota.ini playbooks/14_delegacion_y_run_once.yml
 ansible-playbook -i inventario_dinamico.py playbooks/20_inventario_dinamico.yml
 ansible-playbook -i inventario_dinamico.py -i inventario_construido.yml playbooks/21_inventario_por_capas.yml
+ansible-playbook -i inventario_flota_plugin.yml playbooks/33_inventory_plugin_a_medida.yml
 ./flota.sh down        # apagar y eliminar la flota (no queda nada corriendo)
 ```
 

@@ -335,6 +335,12 @@ jobs:
       - name: "Playbook 31 — connection plugin a medida (asserts incluidos)"
         run: ansible-playbook -i inventario_flota_docker.ini playbooks/31_connection_a_medida.yml
 
+      # Inventory plugin: la flota descubierta por la novena extensión, con
+      # la trampa doble de verify_file y la clave plugin: provocada de
+      # verdad, el careo script-vs-plugin y SSH real a lo descubierto.
+      - name: "Playbook 33 — inventory plugin a medida (asserts incluidos)"
+        run: ansible-playbook -i inventario_flota_plugin.yml playbooks/33_inventory_plugin_a_medida.yml
+
       - name: Apagar la flota
         if: always()
         run: ./flota.sh down

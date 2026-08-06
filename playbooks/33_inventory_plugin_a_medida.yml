@@ -1,0 +1,189 @@
+---
+# =============================================================================
+# Playbook 33 — Inventory plugin a medida: la novena extensión — LA FUENTE
+#
+# El tour de extensiones se cerró dos veces (con los tests en el 30, con la
+# colección en el 32)... y quedaba una puerta: el INVENTARIO también es un
+# plugin. El arco completo son tres playbooks: el 20 descubrió la flota con
+# un SCRIPT (ejecutable + contrato JSON --list/_meta/--host), el 21 apiló la
+# capa constructed (un inventory plugin de serie), y este escribe el plugin
+# DE VERDAD — la misma clase con la que están hechos amazon.aws.aws_ec2,
+# community.docker.docker_containers y el propio constructed.
+#
+#   script (20)                         plugin (33)
+#   ─────────────────────────────       ─────────────────────────────────────
+#   ejecutable, CUALQUIER lenguaje      Python dentro del proceso de Ansible
+#   contrato: JSON por stdout           API: inventory.add_host/add_group
+#   se activa por ser ejecutable        'auto' lee la clave plugin: del YAML
+#   acepta lo que le echen              verify_file() puede RECHAZAR ficheros
+#   opciones: argv/env artesanal        DOCUMENTATION + get_option()
+#
+# La pieza: inventory_plugins/lab_flota.py + inventario_flota_plugin.yml (el
+# YAML no es el inventario, es la CONFIGURACIÓN del plugin que lo construye;
+# ansible.cfg añade la ruta inventory_plugins para que 'auto' lo encuentre).
+#
+# LA TRAMPA DOBLE, provocada de verdad en la play 1:
+#   1) verify_file es un portero: el MISMO contenido con un nombre que el
+#      plugin no acepta muere en "could not be verified" — y como enseñó el
+#      21, la fuente descartada es WARNING + rc 0 + inventario vacío, no
+#      error. (Por eso aws_ec2 exige *.aws_ec2.yml: mejor negarse a parsear
+#      que parsear a medias lo que no es tuyo.)
+#   2) Sin la clave plugin:, el fichero bien nombrado NI SIQUIERA avisa: el
+#      plugin 'yaml' (siguiente en la cola de 'auto') se lo queda como
+#      inventario YAML vacío y el "Unable to parse" nunca llega — cero
+#      hosts con rc 0 y la conciencia tranquila.
+#
+# La play 2 conecta POR SSH REAL a lo que el plugin descubrió, como el 20:
+# si add_host inventara nodos o puertos, el hostname remoto lo desmentiría.
+#
+# Y una lección extra CAZADA al probar: los hosts que añade un plugin no
+# traen el magic var inventory_dir (el "{{ inventory_dir }}" heredado del
+# INI/script llegaba LITERAL al ssh, que intentaba resolver "inventory_dir"
+# como hostname). El arreglo es de plugin: parse() conoce la ruta de su
+# fichero de configuración y deja las rutas de clave/known_hosts resueltas.
+#
+# Requiere la flota arriba (./flota.sh up && ./flota.sh esperar) y ejecutarse
+# desde la raíz del repo (ansible.cfg fija la ruta de inventory_plugins).
+#
+# Ejecutar:
+#   ansible-playbook -i inventario_flota_plugin.yml playbooks/33_inventory_plugin_a_medida.yml
+# =============================================================================
+
+- name: El plugin de inventario, visto desde fuera (contrato y trampas)
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    raiz_repo: "{{ playbook_dir }}/.."
+    copia_mal_nombrada: "{{ raiz_repo }}/entorno-prueba/inventario_mal_nombrado.yml"
+    copia_sin_clave: "{{ raiz_repo }}/entorno-prueba/sin_clave_flota_plugin.yml"
+
+  tasks:
+    # ── el inventario de ESTA ejecución ya lo construyó el plugin ─────────
+    - name: Los grupos del play salen de add_group/add_host, no de un INI
+      ansible.builtin.assert:
+        that:
+          - groups['web'] | sort == ['web1', 'web2']
+          - groups['db'] == ['db1']
+          - groups['flota'] | length == 3
+          # el puerto de cada nodo lo puso set_variable() al descubrirlo
+          - hostvars['web1'].ansible_port is defined
+        success_msg: El inventario en memoria lo montó lab_flota con su API.
+        fail_msg: >-
+          Los grupos no coinciden — ¿se lanzó sin -i inventario_flota_plugin.yml
+          o con la flota a medias? (./flota.sh up && ./flota.sh esperar)
+
+    # ── dos puertas, la misma verdad: el plugin contra el script del 20 ───
+    - name: Preguntar a la otra puerta (el script del playbook 20)
+      ansible.builtin.command: "{{ raiz_repo }}/inventario_dinamico.py --list"
+      register: script_crudo
+      changed_when: false
+
+    - name: Script y plugin descubren exactamente los mismos nodos y puertos
+      vars:
+        script_hostvars: "{{ (script_crudo.stdout | from_json)._meta.hostvars }}"
+      ansible.builtin.assert:
+        that:
+          - script_hostvars.keys() | sort == groups['flota'] | sort
+          - >-
+            groups['flota']
+            | map('extract', hostvars, 'ansible_port') | list | sort
+            == script_hostvars.values() | map(attribute='ansible_port') | list | sort
+        success_msg: Misma flota por las dos puertas — la fuente de verdad manda.
+        fail_msg: El script y el plugin discrepan — una de las dos puertas miente.
+
+    # ── TRAMPA 1: el portero verify_file ──────────────────────────────────
+    - name: Copiar la MISMA configuración con un nombre que el portero no acepta
+      ansible.builtin.copy:
+        src: "{{ raiz_repo }}/inventario_flota_plugin.yml"
+        dest: "{{ copia_mal_nombrada }}"
+        mode: "0644"
+
+    - name: Pedirle el inventario a la copia mal nombrada
+      ansible.builtin.command:
+        cmd: ansible-inventory -i {{ copia_mal_nombrada }} --list
+        chdir: "{{ raiz_repo }}"
+      register: mal_nombrada
+      changed_when: false
+
+    - name: Mismo contenido, nombre equivocado = verificación negada, aviso y rc 0
+      ansible.builtin.assert:
+        that:
+          # nuestro verify_file dijo que no, y 'auto' lo cuenta tal cual
+          - "\"could not be verified by inventory plugin 'lab_flota'\" in mal_nombrada.stderr"
+          # tras agotar la cola de plugins, la fuente entera se descarta...
+          - "'Unable to parse' in mal_nombrada.stderr"
+          # ...pero como WARNING con rc 0 (la letra pequeña del 21): el
+          # comando "funciona" y devuelve un inventario sin un solo host
+          - mal_nombrada.rc == 0
+          - (mal_nombrada.stdout | from_json)._meta.hostvars | length == 0
+        success_msg: >-
+          verify_file rechazó la copia: warning, rc 0 e inventario vacío —
+          el portero funciona y el 21 ya contó por qué esto no para nada.
+        fail_msg: La copia mal nombrada no murió como se esperaba.
+
+    # ── TRAMPA 2: bien nombrado pero sin la clave plugin: ─────────────────
+    - name: Escribir un YAML bien nombrado al que le falta la clave plugin
+      ansible.builtin.copy:
+        dest: "{{ copia_sin_clave }}"
+        content: |
+          ---
+          prefijo_contenedor: ansible-lab-
+        mode: "0644"
+
+    - name: Pedirle el inventario al YAML sin despachador
+      ansible.builtin.command:
+        cmd: ansible-inventory -i {{ copia_sin_clave }} --list
+        chdir: "{{ raiz_repo }}"
+      register: sin_clave
+      changed_when: false
+
+    - name: Sin plugin no hay despacho — y esta vez NI SIQUIERA hay aviso final
+      ansible.builtin.assert:
+        that:
+          # el plugin 'yaml' (siguiente en la cola) se queda el fichero como
+          # inventario YAML: la opción suelta ni es grupo ni es nada...
+          - "'not a valid group definition' in sin_clave.stderr"
+          # ...así que la fuente SÍ parseó (cero "Unable to parse"): un
+          # inventario vacío perfectamente legal, sin el consuelo del aviso
+          - "'Unable to parse' not in sin_clave.stderr"
+          - sin_clave.rc == 0
+          - (sin_clave.stdout | from_json)._meta.hostvars | length == 0
+        success_msg: >-
+          La clave plugin: es el despachador: sin ella el YAML cae en manos
+          del plugin 'yaml' y se vuelve un inventario vacío SIN warning final.
+        fail_msg: El YAML sin clave plugin no se comportó como se esperaba.
+
+    - name: Retirar las dos copias de la provocación
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ copia_mal_nombrada }}"
+        - "{{ copia_sin_clave }}"
+
+- name: Conectar de verdad con lo que el plugin descubrió (la prueba que no miente)
+  hosts: flota
+  gather_facts: false
+
+  tasks:
+    # Si add_host/set_variable hubieran inventado nodos o puertos, aquí se
+    # acaba la función: el ping va por SSH real contra lo que dijo Docker.
+    - name: Ping por SSH a cada nodo que add_host puso en el inventario
+      ansible.builtin.ping:
+
+    - name: Preguntar su nombre al contenedor del otro lado del puerto
+      ansible.builtin.command: hostname
+      register: nombre_real
+      changed_when: false
+
+    - name: El nodo al otro lado del puerto es quien el plugin dice
+      ansible.builtin.assert:
+        that:
+          - nombre_real.stdout == inventory_hostname
+        success_msg: >-
+          {{ inventory_hostname }} responde en el puerto
+          {{ ansible_port }} — set_variable() y la realidad coinciden.
+        fail_msg: >-
+          El puerto {{ ansible_port }} no lleva a {{ inventory_hostname }}
+          sino a {{ nombre_real.stdout }} — el plugin y la realidad discrepan.

@@ -1,0 +1,11 @@
+---
+# Inventario por PLUGIN (playbook 33): este YAML no es el inventario, es la
+# CONFIGURACIÓN del plugin que lo construye. La clave plugin: es el
+# despachador — el plugin 'auto' (activado por defecto) la lee y le pasa el
+# fichero a lab_flota (inventory_plugins/lab_flota.py)... si su verify_file
+# lo acepta: tiene que llamarse *flota_plugin.yml, y por eso este fichero se
+# llama como se llama.
+#
+# Uso:  ansible-playbook -i inventario_flota_plugin.yml playbooks/33_inventory_plugin_a_medida.yml
+plugin: lab_flota
+prefijo_contenedor: ansible-lab-
