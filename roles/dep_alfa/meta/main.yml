@@ -1,0 +1,6 @@
+---
+# La forma clásica: un rol declara de qué depende y Ansible lo ejecuta ANTES
+# que a él. No es "incluir": es una relación declarada en el meta, resuelta
+# al cargar la play, con su propia deduplicación (ver dep_sello/meta).
+dependencies:
+  - role: dep_sello

@@ -1,0 +1,16 @@
+---
+# El testigo de todo el playbook 34: cada vez que este rol se EJECUTA de
+# verdad, añade una línea al fichero de sellos.
+#
+# Por qué `shell` con `>>` y no `lineinfile`: hace falta un APPEND REAL.
+# lineinfile es idempotente por diseño — si la línea ya está, no la vuelve
+# a escribir — así que con params iguales el contador se quedaba en 1 y
+# parecía que Ansible había deduplicado la ejecución cuando en realidad la
+# había ejecutado dos veces. Un medidor idempotente no puede contar
+# invocaciones: la primera versión de este rol mentía.
+- name: Registrar una invocación real del rol dependencia
+  ansible.builtin.shell:
+    cmd: >-
+      echo "{{ dep_sello_quien }} etiqueta={{ dep_sello_etiqueta }}"
+      >> {{ dep_sello_fichero }}
+  changed_when: false

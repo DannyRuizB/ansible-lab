@@ -1,0 +1,9 @@
+---
+# El nombre con el que el sello se identifica en el fichero.
+dep_sello_quien: dep_sello
+# La "etiqueta" es el parámetro que el rol padre le pasa al declararlo como
+# dependencia. Su valor entra en la FIRMA de deduplicación: dos roles que
+# declaran esta misma dependencia con etiquetas DISTINTAS la ejecutan dos
+# veces, sin necesidad de allow_duplicates (escena 3).
+dep_sello_etiqueta: sin-parametro
+dep_sello_fichero: "{{ playbook_dir }}/../informes/sellos_dependencias.txt"

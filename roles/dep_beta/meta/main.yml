@@ -1,0 +1,6 @@
+---
+# Declara LA MISMA dependencia que dep_alfa. En una play que use los dos
+# roles, dep_sello se ejecuta UNA sola vez (escena 2) — salvo que cada uno
+# le pase parámetros distintos (escena 3).
+dependencies:
+  - role: dep_sello

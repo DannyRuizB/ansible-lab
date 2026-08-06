@@ -238,6 +238,12 @@ jobs:
       - name: "Playbook 32 — colección propia (asserts incluidos)"
         run: ansible-playbook playbooks/32_coleccion_propia.yml
 
+      # Dependencias de roles: las siete escenas del meta/main.yml, con la
+      # deduplicación por firma medida con un testigo de append real y la
+      # trampa del rol listado que no corre porque ya corrió como dependencia.
+      - name: "Playbook 34 — dependencias de roles (asserts incluidos)"
+        run: ansible-playbook playbooks/34_dependencias_de_roles.yml
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \

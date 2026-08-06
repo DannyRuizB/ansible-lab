@@ -1,0 +1,5 @@
+---
+- name: Alfa hace su trabajo (después de su dependencia, nunca antes)
+  ansible.builtin.shell:
+    cmd: 'echo "dep_alfa" >> {{ dep_sello_fichero }}'
+  changed_when: false

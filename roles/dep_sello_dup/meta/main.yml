@@ -1,0 +1,7 @@
+---
+# LA excepción: con allow_duplicates: true el rol se ejecuta una vez POR
+# CADA declaración, aunque los parámetros sean idénticos. Es el patrón para
+# dependencias que representan una ACCIÓN repetible ("despliega una
+# instancia más"), no un estado idempotente ("el paquete está instalado").
+allow_duplicates: true
+dependencies: []

@@ -1,0 +1,7 @@
+---
+# allow_duplicates AUSENTE = false, el DEFAULT de Ansible: en una misma play
+# este rol se ejecuta UNA sola vez por firma (nombre + parámetros), aunque
+# lo declaren tres roles distintos. Es lo que hace que una dependencia
+# compartida (instalar un paquete común, crear un usuario de servicio) no
+# se repita — y también lo que sorprende cuando esperabas que se repitiera.
+dependencies: []

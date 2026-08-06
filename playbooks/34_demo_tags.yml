@@ -1,0 +1,25 @@
+---
+# Auxiliar del playbook 34, escena 6 (mismo patrón que 28_demo_tags.yml y
+# 29_demo_cache.yml): el playbook principal lo ejecuta como orden anidada con
+# `--tags solo_alfa`, porque el efecto de una selección por tags solo se puede
+# medir desde FUERA de la ejecución que la aplica.
+#
+# Los dos roles llevan tag propio; sus dependencias (dep_sello) no llevan
+# ninguno. Lo que la escena comprueba es que el tag del rol BAJA a la
+# dependencia — al contrario que un include_tasks (playbook 28).
+- name: "34.6 (auxiliar) — dos roles etiquetados y sus dependencias sin tag"
+  hosts: laboratorio
+  gather_facts: false
+
+  pre_tasks:
+    - name: Empezar con el testigo en blanco
+      ansible.builtin.file:
+        path: "{{ dep_sello_fichero }}"
+        state: absent
+      tags: [always]
+
+  roles:
+    - role: dep_alfa
+      tags: [solo_alfa]
+    - role: dep_beta
+      tags: [solo_beta]
