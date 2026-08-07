@@ -1,0 +1,34 @@
+---
+# =============================================================================
+# Demo interior del playbook 35 (lo lanza 35_cache_plugin_a_medida.yml, no se
+# ejecuta a mano). La política de caché llega POR ENTORNO desde la orden
+# exterior (ANSIBLE_CACHE_PLUGIN=lab_json …). Dos usos según {{ modo }}:
+#
+#   - modo=plantar: deja {{ sello }} como fact CACHEABLE. Con nuestro backend
+#     configurado, viaja al fichero del host y sobrevive a este proceso.
+#   - modo=leer: mira qué sello traían los facts (de la caché que dejó una
+#     pasada anterior, en OTRO proceso) y lo escribe en {{ registro }}.
+# =============================================================================
+
+- name: Demo de cache plugin — plantar o leer un sello cacheable
+  hosts: localhost
+  gather_facts: false
+  vars:
+    modo: leer
+    sello: sin-sello
+    registro: /tmp/ansible-lab-35/sin_registro.json
+  tasks:
+    - name: Plantar el sello de esta pasada como fact CACHEABLE
+      ansible.builtin.set_fact:
+        lab_sello_cacheable: "{{ sello }}"
+        cacheable: true
+      when: modo == 'plantar'
+
+    - name: Leer el sello que venía en los facts (de la caché, otro proceso)
+      ansible.builtin.copy:
+        dest: "{{ registro }}"
+        mode: "0644"
+        content: >-
+          {{ {'sello_recuperado': ansible_facts.get('lab_sello_cacheable', 'AUSENTE')}
+             | to_nice_json }}
+      when: modo == 'leer'

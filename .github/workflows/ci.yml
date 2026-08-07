@@ -244,6 +244,12 @@ jobs:
       - name: "Playbook 34 — dependencias de roles (asserts incluidos)"
         run: ansible-playbook playbooks/34_dependencias_de_roles.yml
 
+      # Cache plugin a medida (la décima extensión): planta un sello cacheable
+      # con lab_json, comprueba en disco que lo escribió NUESTRO backend (sobre
+      # _lab_cache, indentado) y que otro proceso lo recupera de la caché.
+      - name: "Playbook 35 — cache plugin a medida (asserts incluidos)"
+        run: ansible-playbook playbooks/35_cache_plugin_a_medida.yml
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \
