@@ -1,0 +1,142 @@
+---
+# =============================================================================
+# Playbook 35 — Cache plugin a medida: la DÉCIMA extensión del tour
+#
+# El playbook 29 USA el jsonfile de serie para cachear facts entre pasadas.
+# Este escribe el BACKEND: `cache_plugins/lab_json.py` decide DÓNDE y CÓMO se
+# guardan los facts. Es la última familia de plugins del tour, tras filtros
+# (19), callback (22), lookup (23), action (24), módulo (25), vars (26),
+# tests (30), connection (31) e inventory (33) — más la colección (32).
+#
+# Un cache plugin de fichero hereda de BaseFileCacheModule (un fichero por
+# host, caducidad con fact_caching_timeout, claves/flush) y solo dice cómo se
+# serializa un valor: _dump al escribir, _load al leer. El nuestro envuelve
+# los facts en un sobre con marca propia (_lab_cache / stored_by: lab_json) e
+# indenta el JSON — el jsonfile de serie escribe el dict pelado en una línea.
+# Esa diferencia es lo que hace VISIBLE que corrió nuestro plugin.
+#
+# Como la gracia está "entre ejecuciones", se demuestra con órdenes anidadas
+# (una ansible-playbook por escena, como el 28 y el 29) y asserts sobre lo que
+# quedó:
+#   - Escena 1: una pasada planta un sello CACHEABLE bajo lab_json.
+#   - El fichero en disco lleva la marca _lab_cache y stored_by: lab_json, y
+#     es MULTILÍNEA (indentado) — prueba de que lo escribió el nuestro, no el
+#     jsonfile de serie.
+#   - Escena 2: OTRO proceso arranca con gathering=smart, recupera el sello de
+#     la caché y lo deja en un registro — la persistencia entre procesos por
+#     NUESTRO backend.
+#
+# Toda la política va por entorno (ANSIBLE_CACHE_PLUGIN=lab_json …) para no
+# tocar el ansible.cfg del repo; en producción iría en [defaults].
+#
+# Ejecutar:
+#   ansible-playbook playbooks/35_cache_plugin_a_medida.yml
+# =============================================================================
+
+- name: Cache plugin a medida — plantar, comprobar el disco, recuperar
+  hosts: localhost
+  gather_facts: false
+  vars:
+    raiz_repo: "{{ playbook_dir }}/.."
+    carpeta_35: /tmp/ansible-lab-35
+    cache_35: /tmp/ansible-lab-35/cache
+    demo_35: playbooks/35_demo_cache_plugin.yml
+    entorno_cache:
+      ANSIBLE_GATHERING: smart
+      ANSIBLE_CACHE_PLUGIN: lab_json
+      ANSIBLE_CACHE_PLUGIN_CONNECTION: /tmp/ansible-lab-35/cache
+      ANSIBLE_CACHE_PLUGIN_TIMEOUT: "3600"
+  tasks:
+    - name: Empezar sin restos de ejecuciones anteriores
+      ansible.builtin.file:
+        path: "{{ carpeta_35 }}"
+        state: absent
+
+    - name: Crear la carpeta de la caché
+      ansible.builtin.file:
+        path: "{{ cache_35 }}"
+        state: directory
+        mode: "0755"
+
+    # ------------------------------------------------------------------
+    # Escena 1 — una pasada planta un sello cacheable con lab_json.
+    # ------------------------------------------------------------------
+    - name: "Escena 1 — plantar el sello (proceso 1, backend lab_json)"
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook
+          -e modo=plantar
+          -e sello=escrito-en-proceso-1
+          {{ demo_35 }}
+        chdir: "{{ raiz_repo }}"
+      environment: "{{ entorno_cache }}"
+      changed_when: true
+
+    # ------------------------------------------------------------------
+    # El artefacto en disco: ¿lo escribió NUESTRO plugin?
+    # ------------------------------------------------------------------
+    - name: Encontrar el fichero de caché del host (el core le pone prefijo)
+      ansible.builtin.find:
+        paths: "{{ cache_35 }}"
+        patterns: "*localhost*"
+      register: ficheros_cache
+
+    - name: Tiene que haber exactamente un fichero de caché
+      ansible.builtin.assert:
+        that: ficheros_cache.files | length == 1
+        fail_msg: "esperaba un fichero de caché para localhost, hay {{ ficheros_cache.files | length }}"
+
+    - name: Leer el fichero de caché en crudo
+      ansible.builtin.slurp:
+        src: "{{ ficheros_cache.files[0].path }}"
+      register: cache_cruda
+
+    - name: Fijar el texto de la caché para los asserts
+      ansible.builtin.set_fact:
+        # Los facts se serializan con un sobre __payload__ y valores
+        # etiquetados (ansible-core 2.21), así que se comprueba el TEXTO,
+        # no una estructura parseada — la lección del playbook 29.
+        cache_texto: "{{ cache_cruda.content | b64decode }}"
+
+    - name: El fichero lo escribió lab_json, no el jsonfile de serie
+      ansible.builtin.assert:
+        that:
+          - "'\"_lab_cache\"' in cache_texto"
+          - "'\"stored_by\": \"lab_json\"' in cache_texto"
+          # Indentado = multilínea; el jsonfile de serie es una sola línea.
+          - cache_texto.split('\n') | length > 3
+          # Y el sello plantado está dentro del sobre.
+          - "'escrito-en-proceso-1' in cache_texto"
+        fail_msg: "el fichero de caché no tiene la firma de lab_json"
+        success_msg: "el fichero lo escribió lab_json (sobre _lab_cache, indentado)"
+
+    # ------------------------------------------------------------------
+    # Escena 2 — OTRO proceso recupera el sello de la caché.
+    # ------------------------------------------------------------------
+    - name: "Escena 2 — leer el sello (proceso 2, gathering smart)"
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook
+          -e modo=leer
+          -e registro={{ carpeta_35 }}/recuperado.json
+          {{ demo_35 }}
+        chdir: "{{ raiz_repo }}"
+      environment: "{{ entorno_cache }}"
+      changed_when: true
+
+    - name: Leer el registro que dejó el segundo proceso
+      ansible.builtin.slurp:
+        src: "{{ carpeta_35 }}/recuperado.json"
+      register: recuperado_crudo
+
+    - name: El sello sobrevivió al cambio de proceso por nuestro backend
+      ansible.builtin.assert:
+        that:
+          - (recuperado_crudo.content | b64decode | from_json).sello_recuperado == 'escrito-en-proceso-1'
+        fail_msg: "el sello no sobrevivió a la caché entre procesos"
+        success_msg: "el sello viajó del proceso 1 al 2 por la caché lab_json"
+
+    - name: Limpiar
+      ansible.builtin.file:
+        path: "{{ carpeta_35 }}"
+        state: absent
