@@ -50,6 +50,14 @@
     # fqdn y hostname corto pueden coincidir (o no) segun la maquina: se
     # generan LOS DOS nombres que ansible-pull va a probar y listo.
     nombres_de_host_36: "{{ [ansible_fqdn, ansible_hostname] | unique }}"
+    # TRAMPA AMBIENTAL (la cazo el CI): un ansible anidado HEREDA el entorno,
+    # y una ANSIBLE_VAULT_PASSWORD_FILE en ruta RELATIVA (como la exporta el
+    # workflow) se resuelve contra el cwd del anidado — que no es el repo — y
+    # ansible-pull muere antes de arrancar. El ansible-pull real de un cron
+    # corre con el entorno del cron, no con el tuyo: entorno explicito y
+    # rutas absolutas.
+    entorno_pull_36:
+      ANSIBLE_VAULT_PASSWORD_FILE: /tmp/ansible-lab-36/vault_pass
   tasks:
     - name: Empezar sin restos de ejecuciones anteriores
       ansible.builtin.file:
@@ -61,6 +69,12 @@
         path: "{{ repo_36 }}"
         state: directory
         mode: "0755"
+
+    - name: Dejar una llave de vault propia (los playbooks del pull no la usan)
+      ansible.builtin.copy:
+        content: "sin-uso\n"
+        dest: /tmp/ansible-lab-36/vault_pass
+        mode: "0600"
 
     # ------------------------------------------------------------------
     # Escena 0 — fabricar el repo remoto: solo local.yml, un commit.
@@ -104,6 +118,7 @@
           ansible-pull -U file://{{ repo_36 }} -d {{ checkout_36 }}
       register: pull_basico
       changed_when: true
+      environment: "{{ entorno_pull_36 }}"
 
     - name: Leer la marca que dejo el playbook aplicado
       ansible.builtin.slurp:
@@ -170,6 +185,7 @@
         cmd: >-
           ansible-pull -U file://{{ repo_36 }} -d {{ checkout_36 }}
       changed_when: true
+      environment: "{{ entorno_pull_36 }}"
 
     - name: Leer la marca de la escena 2
       ansible.builtin.slurp:
@@ -207,6 +223,7 @@
           --only-if-changed
       register: pull_sin_cambio
       changed_when: false
+      environment: "{{ entorno_pull_36 }}"
 
     - name: Mirar si la marca existe tras la escena 3
       ansible.builtin.stat:
@@ -240,6 +257,7 @@
           ansible-pull -U file://{{ repo_36 }} -d {{ checkout_36 }}
           --only-if-changed
       changed_when: true
+      environment: "{{ entorno_pull_36 }}"
 
     - name: Leer la marca de la escena 4
       ansible.builtin.slurp:
@@ -293,6 +311,7 @@
       register: pull_sin_playbook
       changed_when: false
       failed_when: pull_sin_playbook.rc == 0
+      environment: "{{ entorno_pull_36 }}"
 
     - name: "Escena 5 — el fallo llega con nombre y apellidos"
       ansible.builtin.assert:
