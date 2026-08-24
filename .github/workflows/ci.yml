@@ -250,6 +250,15 @@ jobs:
       - name: "Playbook 35 — cache plugin a medida (asserts incluidos)"
         run: ansible-playbook playbooks/35_cache_plugin_a_medida.yml
 
+      # ansible-pull (el modelo invertido): fabrica un repo git en /tmp, tira
+      # de él por file:// y asserta la convención de nombres ({fqdn} →
+      # {hostname} → local.yml), que el nombre de host gana a local.yml, la
+      # trampa de --only-if-changed (rc 0 sin ejecutar nada) y el error
+      # ruidoso del repo sin candidatos. Sin pasada de idempotencia: cada
+      # ejecución fabrica repos y commits nuevos.
+      - name: "Playbook 36 — ansible-pull (asserts incluidos)"
+        run: ansible-playbook playbooks/36_ansible_pull.yml
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \

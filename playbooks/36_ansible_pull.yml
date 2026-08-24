@@ -1,0 +1,334 @@
+# =============================================================================
+# Playbook 36 — ansible-pull: el modelo INVERTIDO
+#
+# Todo el laboratorio hasta aquí es push: un controlador empuja config a los
+# nodos. `ansible-pull` le da la vuelta: EL NODO tira de un repo git y se
+# aplica su propio playbook (cron + ansible-pull = flotas que se configuran
+# solas sin controlador central; así se gestionan parques enteros de
+# workstations). Por debajo no hay magia: es azúcar sobre el módulo git +
+# ansible-playbook -c local — la salida lo delata ("localhost | SUCCESS" del
+# git module antes del PLAY).
+#
+# Lo que se demuestra (TODO medido antes de escribirlo):
+#   - Escena 1: convención de nombres — sin decirle playbook, busca en el
+#     checkout {fqdn}.yml → {hostname}.yml → local.yml (las WARNINGs de host
+#     pattern del propio ansible-pull enseñan los dos primeros nombres).
+#   - Escena 2: el playbook CON NOMBRE DE HOST gana a local.yml aunque los
+#     dos existan — así un repo sirve config común (local.yml) y excepciones
+#     por máquina (web1.yml) sin tocar la orden.
+#   - Escena 3: LA TRAMPA de --only-if-changed — sin commit nuevo NO ejecuta
+#     nada y aun así SALE CON RC 0 ("Repository has not changed, quitting").
+#     Una monitorización que lea rc 0 como "config aplicada" se engaña: rc 0
+#     ahí significa "no hacía falta". El estado se mira en el nodo, no en el
+#     rc del cron.
+#   - Escena 4: con un commit nuevo (aunque sea vacío) la misma orden vuelve
+#     a ejecutar — compara SHAs del checkout, no contenido.
+#   - Escena 5: repo sin ninguno de los tres nombres = error RUIDOSO
+#     ("Could not find a playbook to run.", rc != 0) — no un no-op silencioso.
+#
+# El repo del que se tira se fabrica aquí mismo (git init en /tmp — un git
+# repo DENTRO del working tree del laboratorio confundiría al lint y al git
+# exterior) y se consume por URL file://, que para git es un remoto como
+# cualquier otro.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/36_ansible_pull.yml
+# =============================================================================
+
+- name: Ansible-pull — el nodo que se configura a si mismo
+  hosts: localhost
+  gather_facts: true
+  vars:
+    carpeta_36: /tmp/ansible-lab-36
+    repo_36: /tmp/ansible-lab-36/repo
+    repo_vacio_36: /tmp/ansible-lab-36/repo-sin-playbook
+    checkout_36: /tmp/ansible-lab-36/checkout
+    marca_36: /tmp/ansible-lab-36/marca.txt
+    # git exige identidad para commitear; se inyecta por orden, no por config
+    # global (el runner del CI no tiene user.name).
+    git_36: git -c user.email=lab@ansible-lab -c user.name=ansible-lab
+    # fqdn y hostname corto pueden coincidir (o no) segun la maquina: se
+    # generan LOS DOS nombres que ansible-pull va a probar y listo.
+    nombres_de_host_36: "{{ [ansible_fqdn, ansible_hostname] | unique }}"
+    # TRAMPA AMBIENTAL (la cazo el CI): un ansible anidado HEREDA el entorno,
+    # y una ANSIBLE_VAULT_PASSWORD_FILE en ruta RELATIVA (como la exporta el
+    # workflow) se resuelve contra el cwd del anidado — que no es el repo — y
+    # ansible-pull muere antes de arrancar. El ansible-pull real de un cron
+    # corre con el entorno del cron, no con el tuyo: entorno explicito y
+    # rutas absolutas.
+    entorno_pull_36:
+      ANSIBLE_VAULT_PASSWORD_FILE: /tmp/ansible-lab-36/vault_pass
+  tasks:
+    - name: Empezar sin restos de ejecuciones anteriores
+      ansible.builtin.file:
+        path: "{{ carpeta_36 }}"
+        state: absent
+
+    - name: Crear la carpeta del repo del que se tira
+      ansible.builtin.file:
+        path: "{{ repo_36 }}"
+        state: directory
+        mode: "0755"
+
+    - name: Dejar una llave de vault propia (los playbooks del pull no la usan)
+      ansible.builtin.copy:
+        content: "sin-uso\n"
+        dest: /tmp/ansible-lab-36/vault_pass
+        mode: "0600"
+
+    # ------------------------------------------------------------------
+    # Escena 0 — fabricar el repo remoto: solo local.yml, un commit.
+    # El playbook interior escribe QUIEN corrio en la marca (copy pisa:
+    # se lee siempre al ultimo que se aplico).
+    # ------------------------------------------------------------------
+    - name: Escribir el local.yml del repo remoto
+      ansible.builtin.copy:
+        dest: "{{ repo_36 }}/local.yml"
+        mode: "0644"
+        content: |
+          ---
+          - name: Config comun que el nodo se aplica a si mismo
+            hosts: localhost
+            connection: local
+            gather_facts: false
+            tasks:
+              - name: Dejar dicho quien corrio
+                ansible.builtin.copy:
+                  content: "local.yml\n"
+                  dest: /tmp/ansible-lab-36/marca.txt
+                  mode: "0644"
+
+    # El modulo ansible.builtin.git clona y actualiza, pero no sabe hacer
+    # init ni commit — fabricar el "remoto" exige el git de verdad.
+    - name: Iniciar el repo y commitear local.yml # noqa: command-instead-of-module
+      ansible.builtin.shell:
+        cmd: >-
+          git init -q -b main .
+          && {{ git_36 }} add -A
+          && {{ git_36 }} commit -qm "config comun (local.yml)"
+        chdir: "{{ repo_36 }}"
+      changed_when: true
+
+    # ------------------------------------------------------------------
+    # Escena 1 — pull basico: sin nombrar playbook, aplica local.yml.
+    # ------------------------------------------------------------------
+    - name: "Escena 1 — ansible-pull sin nombrar playbook (convencion)"
+      ansible.builtin.command:
+        cmd: >-
+          ansible-pull -U file://{{ repo_36 }} -d {{ checkout_36 }}
+      register: pull_basico
+      changed_when: true
+      environment: "{{ entorno_pull_36 }}"
+
+    - name: Leer la marca que dejo el playbook aplicado
+      ansible.builtin.slurp:
+        src: "{{ marca_36 }}"
+      register: marca_escena1
+
+    - name: "Escena 1 — corrio local.yml, en localhost, y el clon vive en -d"
+      ansible.builtin.assert:
+        that:
+          - marca_escena1.content | b64decode | trim == 'local.yml'
+          - "'PLAY RECAP' in pull_basico.stdout"
+          - "'localhost' in pull_basico.stdout"
+        success_msg: >-
+          Sin nombrar playbook aplico local.yml del checkout, contra su propio
+          localhost — la convencion completa: {fqdn}.yml → {hostname}.yml →
+          local.yml.
+
+    - name: Comprobar que el checkout es un clon de verdad
+      ansible.builtin.stat:
+        path: "{{ checkout_36 }}/local.yml"
+      register: clon_36
+
+    - name: "Escena 1 — el -d dice donde vive el clon"
+      ansible.builtin.assert:
+        that: clon_36.stat.exists
+
+    # ------------------------------------------------------------------
+    # Escena 2 — prioridad: aparece el playbook con nombre de host y
+    # local.yml PIERDE aunque siga en el repo.
+    # ------------------------------------------------------------------
+    - name: Escribir el playbook por nombre de host (fqdn y corto)
+      ansible.builtin.copy:
+        dest: "{{ repo_36 }}/{{ item }}.yml"
+        mode: "0644"
+        content: |
+          ---
+          - name: Excepcion especifica de esta maquina
+            hosts: localhost
+            connection: local
+            gather_facts: false
+            tasks:
+              - name: Dejar dicho quien corrio
+                ansible.builtin.copy:
+                  content: "con-nombre-de-host\n"
+                  dest: /tmp/ansible-lab-36/marca.txt
+                  mode: "0644"
+      loop: "{{ nombres_de_host_36 }}"
+
+    - name: Commitear la excepcion por maquina
+      ansible.builtin.shell:
+        cmd: >-
+          {{ git_36 }} add -A
+          && {{ git_36 }} commit -qm "excepcion por nombre de host"
+        chdir: "{{ repo_36 }}"
+      changed_when: true
+
+    - name: Retirar la marca para que hable la siguiente pasada
+      ansible.builtin.file:
+        path: "{{ marca_36 }}"
+        state: absent
+
+    - name: "Escena 2 — la misma orden, ahora con dos candidatos en el repo"
+      ansible.builtin.command:
+        cmd: >-
+          ansible-pull -U file://{{ repo_36 }} -d {{ checkout_36 }}
+      changed_when: true
+      environment: "{{ entorno_pull_36 }}"
+
+    - name: Leer la marca de la escena 2
+      ansible.builtin.slurp:
+        src: "{{ marca_36 }}"
+      register: marca_escena2
+
+    - name: Confirmar que local.yml sigue existiendo en el checkout
+      ansible.builtin.stat:
+        path: "{{ checkout_36 }}/local.yml"
+      register: local_sigue_36
+
+    - name: "Escena 2 — el nombre de host GANA a local.yml"
+      ansible.builtin.assert:
+        that:
+          - marca_escena2.content | b64decode | trim == 'con-nombre-de-host'
+          - local_sigue_36.stat.exists
+        success_msg: >-
+          local.yml sigue en el repo y aun asi corrio el playbook con nombre
+          de host: config comun para la flota, excepciones por maquina, misma
+          orden de cron en todas.
+
+    # ------------------------------------------------------------------
+    # Escena 3 — LA TRAMPA de --only-if-changed: sin commit nuevo no
+    # ejecuta nada... y sale con rc 0.
+    # ------------------------------------------------------------------
+    - name: Retirar la marca otra vez
+      ansible.builtin.file:
+        path: "{{ marca_36 }}"
+        state: absent
+
+    - name: "Escena 3 — --only-if-changed sin commit nuevo"
+      ansible.builtin.command:
+        cmd: >-
+          ansible-pull -U file://{{ repo_36 }} -d {{ checkout_36 }}
+          --only-if-changed
+      register: pull_sin_cambio
+      changed_when: false
+      environment: "{{ entorno_pull_36 }}"
+
+    - name: Mirar si la marca existe tras la escena 3
+      ansible.builtin.stat:
+        path: "{{ marca_36 }}"
+      register: marca_escena3
+
+    - name: "Escena 3 — rc 0 SIN haber ejecutado el playbook"
+      ansible.builtin.assert:
+        that:
+          - pull_sin_cambio.rc == 0
+          - "'has not changed' in pull_sin_cambio.stdout"
+          - not marca_escena3.stat.exists
+        success_msg: >-
+          Sin commit nuevo no corrio nada y aun asi rc 0: para el cron es
+          exito ("no hacia falta"), pero quien lea rc 0 como "config aplicada"
+          se engaña — el estado se comprueba en el nodo, no en el rc.
+
+    # ------------------------------------------------------------------
+    # Escena 4 — un commit nuevo (vacio vale: compara SHAs, no contenido)
+    # y la misma orden vuelve a aplicar.
+    # ------------------------------------------------------------------
+    - name: Commit vacio para mover el SHA
+      ansible.builtin.command:
+        cmd: "{{ git_36 }} commit -q --allow-empty -m 'cambio sin contenido'"
+        chdir: "{{ repo_36 }}"
+      changed_when: true
+
+    - name: "Escena 4 — --only-if-changed con commit nuevo"
+      ansible.builtin.command:
+        cmd: >-
+          ansible-pull -U file://{{ repo_36 }} -d {{ checkout_36 }}
+          --only-if-changed
+      changed_when: true
+      environment: "{{ entorno_pull_36 }}"
+
+    - name: Leer la marca de la escena 4
+      ansible.builtin.slurp:
+        src: "{{ marca_36 }}"
+      register: marca_escena4
+
+    - name: "Escena 4 — el SHA nuevo dispara la aplicacion"
+      ansible.builtin.assert:
+        that:
+          - marca_escena4.content | b64decode | trim == 'con-nombre-de-host'
+        success_msg: >-
+          El commit vacio movio el SHA y la misma orden volvio a aplicar:
+          --only-if-changed compara el checkout con el remoto, no mira el
+          contenido.
+
+    # ------------------------------------------------------------------
+    # Escena 5 — repo sin ninguno de los tres nombres: error RUIDOSO,
+    # no un no-op con rc 0.
+    # ------------------------------------------------------------------
+    - name: Crear la carpeta del repo sin candidatos
+      ansible.builtin.file:
+        path: "{{ repo_vacio_36 }}"
+        state: directory
+        mode: "0755"
+
+    - name: Fabricar un repo sin playbook con nombre esperado
+      ansible.builtin.copy:
+        dest: "{{ repo_vacio_36 }}/otro.yml"
+        mode: "0644"
+        content: |
+          ---
+          - name: Nadie me va a ejecutar por convencion
+            hosts: localhost
+            gather_facts: false
+            tasks: []
+
+    - name: Iniciar y commitear el repo sin candidatos # noqa: command-instead-of-module
+      ansible.builtin.shell:
+        cmd: >-
+          git init -q -b main .
+          && {{ git_36 }} add -A
+          && {{ git_36 }} commit -qm "sin local.yml"
+        chdir: "{{ repo_vacio_36 }}"
+      changed_when: true
+
+    - name: "Escena 5 — pull contra el repo sin candidatos (debe fallar)"
+      ansible.builtin.command:
+        cmd: >-
+          ansible-pull -U file://{{ repo_vacio_36 }}
+          -d {{ carpeta_36 }}/checkout-sin
+      register: pull_sin_playbook
+      changed_when: false
+      failed_when: pull_sin_playbook.rc == 0
+      environment: "{{ entorno_pull_36 }}"
+
+    - name: "Escena 5 — el fallo llega con nombre y apellidos"
+      ansible.builtin.assert:
+        that:
+          - pull_sin_playbook.rc != 0
+          - >-
+            'Could not find a playbook' in
+            (pull_sin_playbook.stdout + pull_sin_playbook.stderr)
+        success_msg: >-
+          Sin {fqdn}.yml, {hostname}.yml ni local.yml el error es ruidoso y
+          con rc distinto de 0 — un cron que tira de un repo mal montado se
+          entera, no aplica silencio.
+
+    - name: Recapitulacion de la leccion
+      ansible.builtin.debug:
+        msg: >-
+          ansible-pull invierte el modelo: el nodo tira del repo y se aplica
+          {fqdn}.yml → {hostname}.yml → local.yml. --only-if-changed ahorra
+          trabajo comparando SHAs, pero su rc 0 significa "no hacia falta",
+          no "aplicado". Con cron en cada nodo, el repo git ES el controlador.
