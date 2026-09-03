@@ -1,0 +1,7 @@
+---
+# Interior del playbook 38, variante SIN loop_var: este `loop:` pisa la
+# variable `item` del include que lo llamo (ansible avisa y sigue).
+- name: Acumular lo que se ve desde dentro (solo el item interior)
+  ansible.builtin.set_fact:
+    acumulado_sin: "{{ acumulado_sin | default([]) + [item | string] }}"
+  loop: "{{ interiores }}"

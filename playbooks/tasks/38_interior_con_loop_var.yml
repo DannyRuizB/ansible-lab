@@ -1,0 +1,7 @@
+---
+# Interior del playbook 38, variante CON loop_var: el include exterior corre
+# con `exterior`, asi que aqui `item` es del bucle interior y los dos se ven.
+- name: Acumular exterior-interior
+  ansible.builtin.set_fact:
+    acumulado_con: "{{ acumulado_con | default([]) + [exterior ~ '-' ~ item] }}"
+  loop: "{{ interiores }}"
