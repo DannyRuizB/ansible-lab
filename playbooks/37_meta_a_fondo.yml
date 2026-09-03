@@ -1,0 +1,254 @@
+# =============================================================================
+# Playbook 37 — el modulo `meta:` a fondo (el control de flujo del motor)
+#
+# `meta:` no le habla a ningun nodo: le da ordenes AL PROPIO MOTOR de Ansible
+# — vacia handlers, termina la play, borra facts. Casi nadie lo estudia y por
+# eso muerde. Cuatro comportamientos, TODOS medidos contra ansible-core 2.21
+# antes de escribir el playbook:
+#
+#   - Escena 1 (flush_handlers, LA GORDA): un handler notificado NO CORRE si
+#     la play aborta antes de llegar al final — los handlers se guardan para
+#     el final, y "el final" no llega si algo revienta en medio. Resultado:
+#     medio servicio reconfigurado y el `systemctl reload` que lo remataba
+#     nunca disparado. `meta: flush_handlers` los corre YA, en un punto que tu
+#     eliges, asi el reload ocurre aunque un paso posterior falle. Se
+#     demuestra con DOS ordenes anidadas (el idiom de los playbooks 28/29/35):
+#     el mismo playbook interior, con y sin el flush, y se mira en su salida
+#     si el handler llego a correr.
+#
+#   - Escena 2 (end_host): termina la play PARA ESTE HOST y sigue con los
+#     demas — y termina LIMPIO (ok, no failed), no es un fallo disfrazado. Se
+#     salta el resto de tareas del host; se comprueba desde la play siguiente,
+#     porque despues de un end_host no corre nada mas en esta (ni un assert).
+#     Honra el `when` (a diferencia de lo que se suele creer): con when falso
+#     no termina nada.
+#
+#   - Escena 3 (end_play): termina la play para TODOS los hosts — pero la
+#     PLAY SIGUIENTE si corre (end_play cierra una play, no el playbook). El
+#     primo de `end_host` a nivel de play entera.
+#
+#   - Escena 4 (clear_facts): borra los facts RECOGIDOS del host (gather_facts
+#     los repone), pero NO toca los de `set_fact` — una distincion que
+#     sorprende y que el playbook fija con un assert. (Y `noop`: el quinto
+#     verbo, que no hace nada a proposito — el hueco para un `when` que a
+#     veces si y a veces no; se nombra aqui y no se le dedica escena porque su
+#     leccion es "no hace nada".)
+#
+# Todo en localhost, sin tocar nada permanente (solo /tmp, que se limpia).
+#
+# Ejecutar:
+#   ansible-playbook playbooks/37_meta_a_fondo.yml
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# PLAY 1 — flush_handlers: el handler que se pierde, y como rescatarlo
+# -----------------------------------------------------------------------------
+- name: "Meta 1 — flush_handlers (el handler notificado que nunca corre)"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    carpeta_37: /tmp/ansible-lab-37
+    # Un ansible anidado HEREDA el entorno, y la ANSIBLE_VAULT_PASSWORD_FILE
+    # en ruta RELATIVA que exporta el workflow se resolveria contra el cwd del
+    # anidado y lo mataria antes de arrancar (la trampa ambiental del 36).
+    # Y OJO, MEDIDO: ponerla VACIA no la desactiva — ansible resuelve "" como
+    # el directorio actual y muere con "can not be a directory". La salida es
+    # la del 36: un fichero propio, en ruta ABSOLUTA, que el playbook escribe.
+    entorno_37:
+      ANSIBLE_VAULT_PASSWORD_FILE: /tmp/ansible-lab-37/vault_pass
+    # Playbook interior comun a las dos escenas, con un hueco FLUSH_AQUI que
+    # se rellena con la tarea meta o con nada. El handler ESCRIBE su marca en
+    # la salida; si aparece, corrio. (El escalar `|` recorta la sangria del
+    # bloque: la marca, escrita al ras del bloque, queda en la COLUMNA 0 del
+    # texto resultante — y asi hay que buscarla en el replace.)
+    tarea_flush: |-
+      - name: Vaciar los handlers AHORA
+        ansible.builtin.meta: flush_handlers
+    cuerpo_interior: |
+      ---
+      - name: interior
+        hosts: localhost
+        connection: local
+        gather_facts: false
+        tasks:
+          - name: notifica el reload
+            ansible.builtin.command: echo cambio-de-config
+            changed_when: true
+            notify: reload del servicio
+      FLUSH_AQUI
+          - name: un paso posterior revienta
+            ansible.builtin.fail:
+              msg: fallo despues de notificar
+        handlers:
+          - name: reload del servicio
+            ansible.builtin.debug:
+              msg: MARCA-HANDLER-37-CORRIO
+  tasks:
+    - name: Empezar sin restos de ejecuciones anteriores
+      ansible.builtin.file:
+        path: "{{ carpeta_37 }}"
+        state: absent
+
+    - name: Crear la carpeta de trabajo
+      ansible.builtin.file:
+        path: "{{ carpeta_37 }}"
+        state: directory
+        mode: "0755"
+
+    - name: Dejar un fichero de vault (sin uso) para el ansible anidado
+      ansible.builtin.copy:
+        content: "sin-uso\n"
+        dest: "{{ entorno_37.ANSIBLE_VAULT_PASSWORD_FILE }}"
+        mode: "0600"
+
+    # SIN flush: el hueco se queda vacio.
+    - name: Escribir el playbook interior SIN flush_handlers
+      ansible.builtin.copy:
+        dest: "{{ carpeta_37 }}/sin_flush.yml"
+        mode: "0644"
+        content: "{{ cuerpo_interior | replace('FLUSH_AQUI\n', '') }}"
+
+    # CON flush: el hueco lleva la tarea meta, entre el notify y el fail. La
+    # tarea entra sangrada al nivel de las demas con `indent(4, first=true)`;
+    # nada de escribir '\n' dentro de un escalar plegado de YAML: ahi el
+    # backslash-n NO se desescapa (solo lo hacen las comillas dobles) y Jinja
+    # lo deja tal cual — el fichero salia con un `\n` literal y no parseaba.
+    - name: Escribir el playbook interior CON flush_handlers
+      ansible.builtin.copy:
+        dest: "{{ carpeta_37 }}/con_flush.yml"
+        mode: "0644"
+        content: "{{ cuerpo_interior | replace('FLUSH_AQUI', tarea_flush | indent(4, first=true)) }}"
+
+    - name: "Escena 1a — correr el interior SIN flush (se espera que falle)"
+      ansible.builtin.command:
+        cmd: ansible-playbook {{ carpeta_37 }}/sin_flush.yml
+      register: sin_flush
+      changed_when: false
+      failed_when: false
+      environment: "{{ entorno_37 }}"
+
+    - name: "Escena 1b — correr el interior CON flush (tambien falla, pero mas tarde)"
+      ansible.builtin.command:
+        cmd: ansible-playbook {{ carpeta_37 }}/con_flush.yml
+      register: con_flush
+      changed_when: false
+      failed_when: false
+      environment: "{{ entorno_37 }}"
+
+    - name: "Escena 1 — el handler se PIERDE sin flush y se SALVA con flush"
+      ansible.builtin.assert:
+        that:
+          # Los dos interiores fallan (el fail final): el flush no evita el
+          # fallo, solo cambia CUANDO corren los handlers.
+          - sin_flush.rc != 0
+          - con_flush.rc != 0
+          # Sin flush, el reload nunca disparo: la play aborto antes del final.
+          - "'MARCA-HANDLER-37-CORRIO' not in sin_flush.stdout"
+          # Con flush, el reload SI disparo — antes del fallo posterior.
+          - "'MARCA-HANDLER-37-CORRIO' in con_flush.stdout"
+        success_msg: >-
+          Sin flush_handlers el handler notificado se pierde cuando la play
+          aborta; con flush_handlers corre en el punto elegido, aunque un
+          paso posterior falle.
+        fail_msg: "flush_handlers no se comporto como se midio"
+
+# -----------------------------------------------------------------------------
+# PLAY 2 — end_host: termina la play para ESTE host (y deja hecho un rastro)
+# -----------------------------------------------------------------------------
+- name: "Meta 2 — end_host (salta el resto de la play, limpio)"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Dejar constancia de que llegamos ANTES del end_host
+      ansible.builtin.set_fact:
+        meta37_antes_end_host: true
+
+    # Honra el when: con la condicion en falso NO termina nada. Se prueba
+    # poniendola en verdadero (la de verdad) y dejando dicho que un when falso
+    # habria seguido.
+    - name: Terminar la play para este host
+      ansible.builtin.meta: end_host
+      when: true
+
+    # Esta tarea queda DETRAS del end_host: no debe ejecutarse. Si el fact
+    # aparece en la play siguiente, end_host no salto nada.
+    - name: Esto NO deberia ejecutarse (queda tras el end_host)
+      ansible.builtin.set_fact:
+        meta37_despues_end_host: true
+
+# -----------------------------------------------------------------------------
+# PLAY 3 — comprobar end_host desde fuera, y demostrar end_play
+# -----------------------------------------------------------------------------
+- name: "Meta 3 — verificar end_host y disparar end_play"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: "Escena 2 — end_host salto el resto de SU play (limpio, ok)"
+      ansible.builtin.assert:
+        that:
+          - meta37_antes_end_host is defined
+          - meta37_despues_end_host is not defined
+        success_msg: >-
+          end_host terminó la play 2 para este host sin marcarla como fallida
+          y sin ejecutar la tarea que quedaba detrás.
+        fail_msg: "end_host no saltó el resto de la play como se midió"
+
+    - name: Dejar constancia ANTES del end_play
+      ansible.builtin.set_fact:
+        meta37_antes_end_play: true
+
+    - name: Terminar la play para TODOS los hosts
+      ansible.builtin.meta: end_play
+
+    - name: Esto NO deberia ejecutarse (queda tras el end_play)
+      ansible.builtin.set_fact:
+        meta37_despues_end_play: true
+
+# -----------------------------------------------------------------------------
+# PLAY 4 — end_play cerró la play 3, pero ESTA corre; y clear_facts
+# -----------------------------------------------------------------------------
+- name: "Meta 4 — la play siguiente SI corre; clear_facts"
+  hosts: localhost
+  gather_facts: true
+  tasks:
+    - name: "Escena 3 — end_play cerró la play 3, pero la 4 arranca igual"
+      ansible.builtin.assert:
+        that:
+          - meta37_antes_end_play is defined
+          - meta37_despues_end_play is not defined
+        success_msg: >-
+          end_play cerró la play 3 para todos los hosts, y aun así esta play
+          (la 4) arranca: end_play cierra una PLAY, no el playbook.
+        fail_msg: "end_play no se comportó como se midió"
+
+    - name: Poner un fact con set_fact (para el contraste de clear_facts)
+      ansible.builtin.set_fact:
+        meta37_marca_setfact: presente
+
+    - name: "Escena 4 — antes de clear_facts: gathered y set_fact presentes"
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] is defined
+          - meta37_marca_setfact is defined
+        fail_msg: "no había facts que limpiar"
+
+    - name: Borrar los facts del host
+      ansible.builtin.meta: clear_facts
+
+    - name: "Escena 4 — clear_facts borra los GATHERED, no los de set_fact"
+      ansible.builtin.assert:
+        that:
+          # El fact recogido (lo pone gather_facts) desaparece...
+          - ansible_facts['distribution'] is not defined
+          # ...pero la marca de set_fact sobrevive: son cosas distintas.
+          - meta37_marca_setfact is defined
+        success_msg: >-
+          clear_facts vació los facts recogidos (distribution ya no está),
+          pero dejó intacto el fact de set_fact: limpia el inventario de
+          hechos del host, no las variables que tú fijaste.
+        fail_msg: "clear_facts no distinguió gathered de set_fact como se midió"
+
+    - name: Limpiar la carpeta de trabajo
+      ansible.builtin.file:
+        path: /tmp/ansible-lab-37
+        state: absent
