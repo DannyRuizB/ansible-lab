@@ -269,6 +269,14 @@ jobs:
       - name: "Playbook 37 — meta a fondo (asserts incluidos)"
         run: ansible-playbook playbooks/37_meta_a_fondo.yml
 
+      # bucles a fondo: la colisión de `item` en includes anidados (sin y con
+      # loop_var), index_var + extended, label frente a secretos en la salida
+      # (orden anidada, se busca el secreto), with_items aplana y loop no, y
+      # pause entre vueltas medido con marcas de tiempo. Sin pasada de
+      # idempotencia: fabrica y borra su carpeta en cada ejecución.
+      - name: "Playbook 38 — bucles a fondo (asserts incluidos)"
+        run: ansible-playbook playbooks/38_bucles_a_fondo.yml
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \

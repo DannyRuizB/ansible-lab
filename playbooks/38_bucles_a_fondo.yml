@@ -1,0 +1,284 @@
+# =============================================================================
+# Playbook 38 — bucles a fondo: `loop_control`, la colision de `item` y el
+# aplanado que `with_items` hacia y `loop` no hace
+#
+# Todo el mundo escribe `loop:` y `{{ item }}` y ahi se queda. Debajo hay
+# cuatro comportamientos que muerden en cuanto el bucle deja de ser trivial,
+# TODOS medidos contra ansible-core 2.21 antes de escribir el playbook:
+#
+#   - Escena 1 (loop_var y la COLISION de `item`): un `include_tasks` con
+#     `loop:` cuyo fichero incluido TAMBIEN hace `loop:` pisa la variable
+#     `item` — el bucle interior gana y el exterior desaparece (ansible avisa
+#     "The loop variable 'item' is already in use" y sigue). Con
+#     `loop_control.loop_var: exterior` cada nivel tiene su nombre y los dos
+#     valores se combinan. Se demuestra con las DOS variantes y un assert
+#     sobre lo que cada una acumula.
+#
+#   - Escena 2 (index_var + extended): `index_var` da el indice (base 0) y
+#     `extended: true` publica `ansible_loop` (first, last, length, index,
+#     index0, revindex, previtem, nextitem) — lo que hace falta para "coma
+#     entre elementos menos el ultimo" o "ejecuta esto solo en la primera
+#     vuelta" sin trucos con `loop.index` de Jinja, que dentro de una tarea
+#     no existe.
+#
+#   - Escena 3 (label): `loop_control.label` decide QUE imprime ansible por
+#     cada vuelta. Sin label, la salida lleva el item ENTERO — incluidas las
+#     claves que son secretos. Se mide con una orden anidada (el idiom de los
+#     playbooks 28/29/35/37): el mismo bucle sobre items con una clave
+#     "secreto", con y sin label, y se busca el secreto en la salida.
+#
+#   - Escena 4 (`with_items` aplana, `loop` no): `with_items: [[1,2],[3]]`
+#     itera 3 veces (aplana UN nivel); `loop:` sobre la misma lista itera 2
+#     (cada sublista es un item). La migracion mecanica with_items → loop
+#     cambia el numero de vueltas; `loop: "{{ x | flatten(levels=1) }}"` es la
+#     traduccion fiel.
+#
+#   - Escena 5 (pause): `loop_control.pause` mete una espera ENTRE vueltas
+#     (no antes de la primera): tres vueltas con pause 1 tardan >= 2 segundos.
+#     Medido con marcas de tiempo tomadas dentro del propio playbook.
+#
+# Todo en localhost, sin tocar nada permanente (solo /tmp, que se limpia).
+#
+# Ejecutar:
+#   ansible-playbook playbooks/38_bucles_a_fondo.yml
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# PLAY 1 — la colision de `item` y su arreglo (loop_var)
+# -----------------------------------------------------------------------------
+- name: "Bucles 1 — la variable item y la colision en includes anidados"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    carpeta_38: /tmp/ansible-lab-38
+    entorno_38:
+      ANSIBLE_VAULT_PASSWORD_FILE: /tmp/ansible-lab-38/vault_pass
+    exteriores: [a, b]
+    interiores: [1, 2]
+  tasks:
+    - name: Empezar sin restos de ejecuciones anteriores
+      ansible.builtin.file:
+        path: "{{ carpeta_38 }}"
+        state: absent
+
+    - name: Crear la carpeta de trabajo
+      ansible.builtin.file:
+        path: "{{ carpeta_38 }}"
+        state: directory
+        mode: "0755"
+
+    - name: Dejar un fichero de vault (sin uso) para el ansible anidado
+      ansible.builtin.copy:
+        content: "sin-uso\n"
+        dest: "{{ entorno_38.ANSIBLE_VAULT_PASSWORD_FILE }}"
+        mode: "0600"
+
+    # SIN loop_var: el fichero incluido hace su propio loop sobre `item` y
+    # pisa el exterior. Lo que acumula es solo el interior, dos veces.
+    - name: Incluir el bucle interior SIN loop_var (el exterior se pierde)
+      ansible.builtin.include_tasks: tasks/38_interior_sin_loop_var.yml
+      loop: "{{ exteriores }}"
+
+    # CON loop_var: cada nivel tiene nombre y los dos valores se combinan.
+    - name: Incluir el bucle interior CON loop_var (los dos niveles se ven)
+      ansible.builtin.include_tasks: tasks/38_interior_con_loop_var.yml
+      loop: "{{ exteriores }}"
+      loop_control:
+        loop_var: exterior
+
+    - name: "Escena 1 — sin loop_var el exterior desaparece; con loop_var se combina"
+      ansible.builtin.assert:
+        that:
+          # Dos vueltas exteriores × dos interiores = 4 entradas, pero SOLO
+          # con el valor interior: el exterior fue pisado.
+          - acumulado_sin | default([]) == ['1', '2', '1', '2']
+          # Con nombre propio, cada entrada lleva los dos niveles.
+          - acumulado_con | default([]) == ['a-1', 'a-2', 'b-1', 'b-2']
+        success_msg: >-
+          Sin loop_var el include anidado pisa `item` y el valor exterior se
+          pierde ({{ acumulado_sin }}); con loop_var: exterior los dos niveles
+          conviven ({{ acumulado_con }}).
+        fail_msg: "la colision de item no se comporto como se midio: sin={{ acumulado_sin | default([]) }} con={{ acumulado_con | default([]) }}"
+
+# -----------------------------------------------------------------------------
+# PLAY 2 — index_var y extended
+# -----------------------------------------------------------------------------
+- name: "Bucles 2 — index_var y ansible_loop (extended)"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    elementos: [rojo, verde, azul]
+  tasks:
+    - name: Recorrer con indice y ansible_loop publicados
+      ansible.builtin.set_fact:
+        recorrido: >-
+          {{ recorrido | default([]) + [{
+               'item': item,
+               'i': idx,
+               'first': ansible_loop.first,
+               'last': ansible_loop.last,
+               'length': ansible_loop.length,
+               'revindex': ansible_loop.revindex,
+               'prev': ansible_loop.previtem | default('(ninguno)'),
+               'next': ansible_loop.nextitem | default('(ninguno)')
+             }] }}
+      loop: "{{ elementos }}"
+      loop_control:
+        index_var: idx
+        extended: true
+
+    - name: "Escena 2 — index_var es base 0 y ansible_loop sabe donde esta cada vuelta"
+      ansible.builtin.assert:
+        that:
+          - recorrido | map(attribute='i') | list == [0, 1, 2]
+          - recorrido[0].first and not recorrido[0].last
+          - recorrido[2].last and not recorrido[2].first
+          - recorrido | map(attribute='length') | unique | list == [3]
+          - recorrido | map(attribute='revindex') | list == [3, 2, 1]
+          - recorrido[0].prev == '(ninguno)' and recorrido[1].prev == 'rojo'
+          - recorrido[1].next == 'azul' and recorrido[2].next == '(ninguno)'
+        success_msg: >-
+          index_var cuenta desde 0 ({{ recorrido | map(attribute='i') | list }}) y
+          ansible_loop publica first/last/length/revindex/previtem/nextitem por
+          vuelta — la coma-menos-en-el-ultimo sale de ansible_loop.last.
+        fail_msg: "index_var/extended no se comportaron como se midio: {{ recorrido }}"
+
+# -----------------------------------------------------------------------------
+# PLAY 3 — label: lo que ansible imprime por vuelta (y los secretos que se cuelan)
+# -----------------------------------------------------------------------------
+- name: "Bucles 3 — loop_control.label y los secretos en la salida"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    carpeta_38: /tmp/ansible-lab-38
+    entorno_38:
+      ANSIBLE_VAULT_PASSWORD_FILE: /tmp/ansible-lab-38/vault_pass
+    # Playbook interior comun a las dos variantes, con un hueco LABEL_AQUI en
+    # la COLUMNA 0 del texto resultante (el escalar `|` recorta la sangria
+    # del bloque — la leccion del playbook 37).
+    cuerpo_interior: |
+      ---
+      - name: interior
+        hosts: localhost
+        connection: local
+        gather_facts: false
+        vars:
+          cuentas:
+            - { nombre: app, secreto: MARCA-SECRETO-38-XYZ }
+            - { nombre: db, secreto: MARCA-SECRETO-38-QWE }
+        tasks:
+          - name: crear un fichero por cuenta
+            ansible.builtin.copy:
+              dest: /tmp/ansible-lab-38/cuenta-{{ '{{' }} item.nombre {{ '}}' }}
+              content: "{{ '{{' }} item.secreto {{ '}}' }}"
+              mode: "0600"
+            loop: "{{ '{{' }} cuentas {{ '}}' }}"
+      LABEL_AQUI
+    tarea_label: |-
+      loop_control:
+        label: "{{ '{{' }} item.nombre {{ '}}' }}"
+  tasks:
+    - name: Escribir el interior SIN label
+      ansible.builtin.copy:
+        dest: "{{ carpeta_38 }}/sin_label.yml"
+        mode: "0644"
+        content: "{{ cuerpo_interior | replace('LABEL_AQUI\n', '') }}"
+
+    - name: Escribir el interior CON label
+      ansible.builtin.copy:
+        dest: "{{ carpeta_38 }}/con_label.yml"
+        mode: "0644"
+        content: "{{ cuerpo_interior | replace('LABEL_AQUI', tarea_label | indent(6, first=true)) }}"
+
+    - name: "Escena 3a — correr el interior SIN label"
+      ansible.builtin.command:
+        cmd: ansible-playbook {{ carpeta_38 }}/sin_label.yml
+      register: sin_label
+      changed_when: false
+      environment: "{{ entorno_38 }}"
+
+    - name: "Escena 3b — correr el interior CON label"
+      ansible.builtin.command:
+        cmd: ansible-playbook {{ carpeta_38 }}/con_label.yml
+      register: con_label
+      changed_when: false
+      environment: "{{ entorno_38 }}"
+
+    - name: "Escena 3 — sin label el secreto sale por pantalla; con label solo el nombre"
+      ansible.builtin.assert:
+        that:
+          - sin_label.rc == 0 and con_label.rc == 0
+          # Sin label, ansible imprime el item entero: el secreto esta en la salida.
+          - "'MARCA-SECRETO-38-XYZ' in sin_label.stdout"
+          # Con label, solo se imprime item.nombre: el secreto no aparece...
+          - "'MARCA-SECRETO-38' not in con_label.stdout"
+          # ...y el nombre si.
+          - "'=> (item=app)' in con_label.stdout"
+        success_msg: >-
+          Sin loop_control.label la salida de cada vuelta lleva el item entero,
+          secretos incluidos; con label solo lo que tu eliges (el nombre).
+          Ojo: label es cosmetico — no_log es lo que protege el log de verdad.
+        fail_msg: "label no se comporto como se midio"
+
+# -----------------------------------------------------------------------------
+# PLAY 4 — with_items aplana, loop no; y pause entre vueltas
+# -----------------------------------------------------------------------------
+- name: "Bucles 4 — el aplanado de with_items y la pausa entre vueltas"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    anidada: [[1, 2], [3]]
+  tasks:
+    - name: Recorrer la lista anidada con with_items (aplana un nivel)
+      ansible.builtin.set_fact:
+        vueltas_with_items: "{{ vueltas_with_items | default([]) + [item] }}"
+      with_items: "{{ anidada }}"
+
+    - name: Recorrer la misma lista con loop (cada sublista es un item)
+      ansible.builtin.set_fact:
+        vueltas_loop: "{{ vueltas_loop | default([]) + [item] }}"
+      loop: "{{ anidada }}"
+
+    - name: Recorrer con loop + flatten(levels=1) (la traduccion fiel de with_items)
+      ansible.builtin.set_fact:
+        vueltas_flatten: "{{ vueltas_flatten | default([]) + [item] }}"
+      loop: "{{ anidada | flatten(levels=1) }}"
+
+    - name: "Escena 4 — with_items da 3 vueltas, loop da 2, loop+flatten vuelve a 3"
+      ansible.builtin.assert:
+        that:
+          - vueltas_with_items == [1, 2, 3]
+          - vueltas_loop == [[1, 2], [3]]
+          - vueltas_flatten == [1, 2, 3]
+        success_msg: >-
+          with_items aplano un nivel (3 vueltas); loop no aplana (2 vueltas,
+          cada sublista es el item); loop con flatten(levels=1) es la
+          migracion fiel (3 vueltas).
+        fail_msg: "el aplanado no se comporto como se midio"
+
+    - name: Marca de tiempo antes del bucle con pausa
+      ansible.builtin.set_fact:
+        t0: "{{ lookup('pipe', 'date +%s') | int }}"
+
+    - name: Tres vueltas con un segundo de pausa ENTRE ellas
+      ansible.builtin.debug:
+        msg: "vuelta {{ item }}"
+      loop: [1, 2, 3]
+      loop_control:
+        pause: 1
+
+    - name: Marca de tiempo despues
+      ansible.builtin.set_fact:
+        t1: "{{ lookup('pipe', 'date +%s') | int }}"
+
+    - name: "Escena 5 — pause espera entre vueltas: tres vueltas, al menos dos segundos"
+      ansible.builtin.assert:
+        that:
+          - (t1 | int) - (t0 | int) >= 2
+        success_msg: "pause: 1 con tres vueltas tardo {{ (t1 | int) - (t0 | int) }} s (la pausa va ENTRE vueltas, no antes de la primera)."
+        fail_msg: "pause no espero como se midio ({{ (t1 | int) - (t0 | int) }} s)"
+
+    - name: Limpiar la carpeta de trabajo
+      ansible.builtin.file:
+        path: /tmp/ansible-lab-38
+        state: absent
