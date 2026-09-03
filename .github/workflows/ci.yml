@@ -277,6 +277,17 @@ jobs:
       - name: "Playbook 38 — bucles a fondo (asserts incluidos)"
         run: ansible-playbook playbooks/38_bucles_a_fondo.yml
 
+      # despliegues por tandas: serial (2, [1,3]), max_fail_percentage (50 no
+      # salta, 30 sí — y termina el playbook, medido en una orden anidada) y
+      # any_errors_fatal (corta la tanda, la siguiente corre). Hay hosts que
+      # fallan A PROPÓSITO, así que el rc esperado es 2; la marca final la
+      # deja la play de veredicto solo si todas las escenas pasaron.
+      - name: "Playbook 39 — despliegues por tandas (rc 2 esperado, asserts incluidos)"
+        run: |
+          rc=0; ansible-playbook playbooks/39_serial_a_fondo.yml || rc=$?
+          [ "$rc" -eq 2 ] || { echo "::error::rc $rc (se esperaba 2: fallos deliberados en nodo3 y nodo2)"; exit 1; }
+          test -f /tmp/ansible-lab-39/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \
