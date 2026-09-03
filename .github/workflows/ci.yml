@@ -259,6 +259,16 @@ jobs:
       - name: "Playbook 36 — ansible-pull (asserts incluidos)"
         run: ansible-playbook playbooks/36_ansible_pull.yml
 
+      # meta: a fondo (órdenes AL MOTOR, no a los nodos): dos órdenes anidadas
+      # con el mismo playbook interior, con y sin flush_handlers, y asserts de
+      # que el handler notificado se PIERDE sin flush y corre con él aunque un
+      # paso posterior falle; end_host (limpio, comprobado desde la play
+      # siguiente), end_play (cierra la play, no el playbook) y clear_facts
+      # (borra los gathered, no los de set_fact). Sin pasada de idempotencia:
+      # fabrica y borra su carpeta de trabajo en cada ejecución.
+      - name: "Playbook 37 — meta a fondo (asserts incluidos)"
+        run: ansible-playbook playbooks/37_meta_a_fondo.yml
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \
