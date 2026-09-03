@@ -1,0 +1,355 @@
+# =============================================================================
+# Playbook 39 — despliegues por tandas a fondo: `serial`, `max_fail_percentage`
+# y `any_errors_fatal` (lo que decide cuantos servidores se rompen antes de
+# que ansible pare)
+#
+# Un playbook sobre 100 servidores con un cambio malo rompe los 100 en una
+# pasada — salvo que se le diga en que tandas ir y cuando parar. Tres
+# palancas, medidas contra ansible-core 2.21 antes de escribir el playbook,
+# sobre una flota FALSA de hosts en memoria (add_host + connection local:
+# ocho alias del propio localhost, sin Docker ni SSH):
+#
+#   - Escena 1 (serial): `serial: 2` recorre la flota en tandas de 2 y
+#     completa TODAS las tareas de la tanda antes de empezar la siguiente.
+#     `serial: [1, 3]` empieza con una tanda de 1 (el canario), luego de 3,
+#     y REPITE el ultimo tamano hasta acabar; `serial: "50%"` es un
+#     porcentaje de la flota. Se mide anotando en el controlador en que
+#     numero de tanda toca cada host.
+#
+#   - Escena 2 (max_fail_percentage): el umbral se evalua AL FINAL DE CADA
+#     TANDA y solo salta cuando el porcentaje de hosts fallidos EN LA TANDA
+#     lo SUPERA (estrictamente mayor que). Con tandas de 2 y un fallo, 50% no
+#     supera `max_fail_percentage: 50` y la play sigue. Supera
+#     `max_fail_percentage: 30` y — MEDIDO, y mas fuerte de lo que se suele
+#     contar — la comprobacion se hace al terminar CADA TAREA, no al final
+#     de la tanda: el companero de tanda del host caido ya no recibe las
+#     tareas siguientes, las tandas restantes no empiezan, y ansible da la
+#     play por fallida y TERMINA EL PLAYBOOK ENTERO ahi (rc 2, "NO MORE
+#     HOSTS LEFT"); las plays que vinieran detras no corren. Por eso ese
+#     experimento va en una orden ANIDADA (el idiom de los playbooks
+#     28/29/35/37/38): se mide su rc, que hosts terminaron y que la play
+#     posterior del playbook interior nunca llego a ejecutarse.
+#
+#   - Escena 3 (any_errors_fatal): con `any_errors_fatal: true` el PRIMER
+#     fallo corta la TANDA: sus companeros se quedan sin las tareas
+#     restantes. MEDIDO (2.21) y contra lo que se suele creer: la tanda
+#     SIGUIENTE arranca de cero y corre entera — any_errors_fatal es un
+#     freno por tanda, no por playbook; para parar todo hay que combinarlo
+#     con `max_fail_percentage: 0` (o no usar serial). Sin ninguna de las
+#     dos, un host que falla sale de la play y los demas siguen hasta el
+#     final: el comportamiento por defecto, que es justo el que rompe los 100.
+#
+#   - Escena 4 (el host caido no vuelve): un host que FALLA en una play queda
+#     FUERA de todas las plays siguientes del mismo playbook — la primera
+#     version de este playbook hacia fallar al mismo nodo en dos plays y la
+#     segunda "no fallaba": el nodo ya no estaba. `meta: clear_host_errors`
+#     es la unica forma de readmitirlo. Y un detalle medido: las TANDAS se
+#     calculan sobre la lista original de hosts y el caido simplemente deja
+#     su tanda mas pequena (serial 4 sobre 8 hosts con nodo3 caido dio las
+#     tandas [1,2,4] y [5,6,7,8], no [1,2,4,5] y [6,7,8]).
+#
+# Los fallos son deliberados (`fail:` con `when:` sobre el nombre del host)
+# y las plays que fallan a proposito van seguidas de una play de assert que
+# lee lo que cada host llego a hacer. Un `ignore_unreachable`/`rescue` no
+# valen aqui: el punto es medir lo que ansible hace SIN red de seguridad.
+#
+# Ejecutar (el rc final es 2 A PROPOSITO: hay plays que fallan para medir):
+#   ansible-playbook playbooks/39_serial_a_fondo.yml; echo "rc=$?"
+# ...y el CI lo ejecuta esperando rc 2 y comprobando la marca final.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# PLAY 0 — la flota falsa: ocho alias del propio localhost, en memoria
+# -----------------------------------------------------------------------------
+- name: "Tandas 0 — fabricar una flota de ocho hosts en memoria"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Añadir ocho alias de localhost al grupo flota39
+      ansible.builtin.add_host:
+        name: "nodo{{ item }}"
+        groups: flota39
+        ansible_connection: local
+        ansible_python_interpreter: "{{ ansible_playbook_python }}"
+      loop: [1, 2, 3, 4, 5, 6, 7, 8]
+      changed_when: false
+
+    - name: Empezar sin restos de ejecuciones anteriores
+      ansible.builtin.file:
+        path: /tmp/ansible-lab-39
+        state: absent
+
+    - name: Crear la carpeta de marcas
+      ansible.builtin.file:
+        path: /tmp/ansible-lab-39
+        state: directory
+        mode: "0755"
+
+# -----------------------------------------------------------------------------
+# PLAY 1 — serial: 2 → cuatro tandas; cada host anota su numero de tanda
+# -----------------------------------------------------------------------------
+- name: "Tandas 1 — serial: 2 recorre la flota de dos en dos"
+  hosts: flota39
+  gather_facts: false
+  serial: 2
+  tasks:
+    # ansible_play_batch es la lista de hosts de la tanda ACTUAL; el numero
+    # de tanda se deduce del primer host de la lista (nodo1→1, nodo3→2...).
+    - name: Anotar en que tanda toca este host
+      ansible.builtin.copy:
+        dest: "/tmp/ansible-lab-39/serial2-{{ inventory_hostname }}"
+        content: "{{ ((ansible_play_batch[0] | regex_replace('nodo', '') | int) - 1) // 2 + 1 }}"
+        mode: "0644"
+      changed_when: false
+
+- name: "Tandas 1b — serial: [1, 3]: canario de uno, luego de tres en tres"
+  hosts: flota39
+  gather_facts: false
+  serial: [1, 3]
+  tasks:
+    - name: Anotar cuantos hosts van en la tanda de este host
+      ansible.builtin.copy:
+        dest: "/tmp/ansible-lab-39/serial13-{{ inventory_hostname }}"
+        content: "{{ ansible_play_batch | length }}"
+        mode: "0644"
+      changed_when: false
+
+- name: "Tandas 1c — comprobar las tandas desde el controlador"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Leer las marcas de serial 2
+      ansible.builtin.set_fact:
+        tandas2: "{{ tandas2 | default([]) + [lookup('file', '/tmp/ansible-lab-39/serial2-nodo' ~ item) | int] }}"
+      loop: [1, 2, 3, 4, 5, 6, 7, 8]
+
+    - name: Leer las marcas de serial [1, 3]
+      ansible.builtin.set_fact:
+        tamanos13: "{{ tamanos13 | default([]) + [lookup('file', '/tmp/ansible-lab-39/serial13-nodo' ~ item) | int] }}"
+      loop: [1, 2, 3, 4, 5, 6, 7, 8]
+
+    - name: "Escena 1 — serial: 2 hace 4 tandas de 2; serial: [1, 3] hace 1, 3, 3 y 1"
+      ansible.builtin.assert:
+        that:
+          - tandas2 == [1, 1, 2, 2, 3, 3, 4, 4]
+          # 8 hosts con [1, 3]: tanda de 1 (nodo1), de 3 (2-4), de 3 (5-7) y
+          # la ultima con lo que queda (nodo8, solo): el ultimo tamano se
+          # repite y la cola se queda con el resto.
+          - tamanos13 == [1, 3, 3, 3, 3, 3, 3, 1]
+        success_msg: >-
+          serial: 2 → tandas {{ tandas2 }}; serial: [1, 3] → tamaños por host
+          {{ tamanos13 }} (canario de uno, luego de tres, y la cola con lo que queda).
+        fail_msg: "serial no repartió como se midió: {{ tandas2 }} / {{ tamanos13 }}"
+
+# -----------------------------------------------------------------------------
+# PLAY 2 — max_fail_percentage: 50 con un fallo en una tanda de 2 → sigue
+# -----------------------------------------------------------------------------
+- name: "Tandas 2 — un fallo entre dos es el 50%: NO supera max_fail_percentage 50"
+  hosts: flota39
+  gather_facts: false
+  serial: 2
+  max_fail_percentage: 50
+  tasks:
+    - name: Nodo3 falla a proposito (tanda 2)
+      ansible.builtin.fail:
+        msg: "fallo deliberado en {{ inventory_hostname }}"
+      when: inventory_hostname == 'nodo3'
+
+    - name: Dejar marca de que este host completo la play (umbral 50)
+      ansible.builtin.copy:
+        dest: "/tmp/ansible-lab-39/umbral50-{{ inventory_hostname }}"
+        content: "ok"
+        mode: "0644"
+      changed_when: false
+
+# -----------------------------------------------------------------------------
+# PLAY 3 — max_fail_percentage: 30 con el mismo fallo → aborta las tandas siguientes
+# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# PLAY 3 — max_fail_percentage: 30 con el mismo tipo de fallo → ansible PARA
+# EL PLAYBOOK. Como nada corre despues, va en una orden anidada.
+# -----------------------------------------------------------------------------
+- name: "Tandas 3 — el umbral superado termina el playbook: se mide desde fuera"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    entorno_39:
+      ANSIBLE_VAULT_PASSWORD_FILE: /tmp/ansible-lab-39/vault_pass
+  tasks:
+    - name: Dejar un fichero de vault (sin uso) para el ansible anidado
+      ansible.builtin.copy:
+        content: "sin-uso\n"
+        dest: "{{ entorno_39.ANSIBLE_VAULT_PASSWORD_FILE }}"
+        mode: "0600"
+
+    # El interior fabrica su propia flota de 8, rompe nodo3 en la tanda 2 con
+    # max_fail_percentage 30 y lleva DETRAS una play que deja una marca: si la
+    # marca aparece, el playbook siguio; si no, el umbral lo termino.
+    - name: Escribir el playbook interior del umbral 30
+      ansible.builtin.copy:
+        dest: /tmp/ansible-lab-39/umbral30.yml
+        mode: "0644"
+        content: |
+          ---
+          - name: flota interior
+            hosts: localhost
+            gather_facts: false
+            tasks:
+              - name: Ocho alias de localhost
+                ansible.builtin.add_host:
+                  name: "nodo{{ '{{' }} item {{ '}}' }}"
+                  groups: flota39i
+                  ansible_connection: local
+                  ansible_python_interpreter: "{{ '{{' }} ansible_playbook_python {{ '}}' }}"
+                loop: [1, 2, 3, 4, 5, 6, 7, 8]
+                changed_when: false
+          - name: umbral 30 en tandas de 2
+            hosts: flota39i
+            gather_facts: false
+            serial: 2
+            max_fail_percentage: 30
+            tasks:
+              - name: Nodo3 falla a proposito (tanda 2)
+                ansible.builtin.fail:
+                  msg: "fallo deliberado en {{ '{{' }} inventory_hostname {{ '}}' }}"
+                when: inventory_hostname == 'nodo3'
+              - name: Marca de host que completo la play
+                ansible.builtin.copy:
+                  dest: "/tmp/ansible-lab-39/umbral30-{{ '{{' }} inventory_hostname {{ '}}' }}"
+                  content: "ok"
+                  mode: "0644"
+                changed_when: false
+          - name: esta play NO deberia correr si el umbral termino el playbook
+            hosts: localhost
+            gather_facts: false
+            tasks:
+              - name: Marca de que el playbook siguio tras el umbral
+                ansible.builtin.copy:
+                  dest: /tmp/ansible-lab-39/INTERIOR-SIGUIO
+                  content: "siguio"
+                  mode: "0644"
+                changed_when: false
+
+    - name: Correr el interior (se espera rc 2 y que se pare en el umbral)
+      ansible.builtin.command:
+        cmd: ansible-playbook /tmp/ansible-lab-39/umbral30.yml
+      register: umbral30_run
+      changed_when: false
+      failed_when: false
+      environment: "{{ entorno_39 }}"
+
+# -----------------------------------------------------------------------------
+# PLAY 4 — any_errors_fatal: el primer fallo para TODO, tanda incluida
+# -----------------------------------------------------------------------------
+- name: "Tandas 4 — any_errors_fatal: el primer fallo para la play para todos"
+  hosts: flota39
+  gather_facts: false
+  serial: 4
+  any_errors_fatal: true
+  tasks:
+    - name: Marca de la primera tarea (todos los de la tanda la ejecutan)
+      ansible.builtin.copy:
+        dest: "/tmp/ansible-lab-39/fatal-t1-{{ inventory_hostname }}"
+        content: "ok"
+        mode: "0644"
+      changed_when: false
+
+    - name: Nodo2 falla a proposito (tanda 1)
+      ansible.builtin.fail:
+        msg: "fallo deliberado en {{ inventory_hostname }}"
+      when: inventory_hostname == 'nodo2'
+
+    - name: Marca de la segunda tarea (con any_errors_fatal nadie llega aqui)
+      ansible.builtin.copy:
+        dest: "/tmp/ansible-lab-39/fatal-t2-{{ inventory_hostname }}"
+        content: "ok"
+        mode: "0644"
+      changed_when: false
+
+# -----------------------------------------------------------------------------
+# PLAY 5 — el veredicto: que hizo cada host en cada play
+# -----------------------------------------------------------------------------
+- name: "Tandas 5 — verificar umbrales y any_errors_fatal desde el controlador"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Contar marcas
+      ansible.builtin.find:
+        paths: /tmp/ansible-lab-39
+        patterns: "{{ item }}-*"
+      loop: [umbral50, umbral30, fatal-t1, fatal-t2]
+      register: marcas
+
+    - name: Resumir en un diccionario patron → hosts
+      ansible.builtin.set_fact:
+        hechos: >-
+          {{ hechos | default({}) | combine({ item.item: item.files | map(attribute='path') | map('basename')
+             | map('regex_replace', '^[a-z0-9-]+-nodo', '') | map('int') | sort }) }}
+      loop: "{{ marcas.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: "Escena 2 — 50% no supera 50: siete hosts completan; 50% supera 30: la tanda del fallo termina y el PLAYBOOK se para"
+      ansible.builtin.assert:
+        that:
+          # Umbral 50: nodo3 falla, los otros siete completan la play.
+          - hechos.umbral50 == [1, 2, 4, 5, 6, 7, 8]
+          # Umbral 30 (interior): tanda 1 (nodo1, nodo2) completa; en la tanda
+          # 2 nodo3 falla en la tarea 1 y nodo4 YA NO recibe la tarea 2 (la
+          # comprobacion es por tarea, no al final de la tanda); las tandas
+          # 3 y 4 no empiezan...
+          - hechos.umbral30 == [1, 2]
+          # ...y el playbook interior murió ahí: rc 2 y su play posterior
+          # nunca dejó su marca.
+          - umbral30_run.rc == 2
+          - "'NO MORE HOSTS LEFT' in umbral30_run.stdout"
+          - not (lookup('file', '/tmp/ansible-lab-39/INTERIOR-SIGUIO', errors='ignore') | default('', true))
+        success_msg: >-
+          max_fail_percentage se evalúa tras cada tarea de la tanda y solo salta
+          al SUPERARLO: con 50 siguieron {{ hechos.umbral50 }}; con 30 terminaron
+          {{ hechos.umbral30 }} (el compañero de tanda del caído ya no recibe
+          más tareas, las tandas siguientes ni empiezan) y el playbook interior
+          terminó ahí (rc {{ umbral30_run.rc }}, "NO MORE HOSTS LEFT", su play
+          posterior no corrió).
+        fail_msg: "max_fail_percentage no se comportó como se midió: {{ hechos }} rc={{ umbral30_run.rc }}"
+
+    - name: "Escena 4 — el host que falló en una play queda fuera de las siguientes"
+      ansible.builtin.assert:
+        that:
+          # nodo3 cayó en la play 2 (umbral 50) y no volvió a aparecer en la de
+          # any_errors_fatal; y su tanda quedó más pequeña ([1,2,4]) en vez de
+          # rellenarse con nodo5: las tandas se calculan sobre la lista original.
+          - 3 not in hechos['fatal-t1']
+          - hechos['fatal-t1'] | length == 7
+          - 5 not in hechos['fatal-t1'] or 5 in hechos['fatal-t2']
+        success_msg: >-
+          Un host que falla sale del resto del playbook: nodo3 (caído en la play
+          2) no participa en las plays siguientes ({{ hechos['fatal-t1'] }}) —
+          solo `meta: clear_host_errors` lo readmite — y su tanda se quedó en
+          [1,2,4]: las tandas se reparten sobre la lista original de hosts.
+        fail_msg: "el host caído reapareció en plays posteriores: {{ hechos }}"
+
+    - name: "Escena 3 — any_errors_fatal corta la TANDA del fallo, y la tanda siguiente corre entera"
+      ansible.builtin.assert:
+        that:
+          # Flota que queda: 1, 2, 4, 5, 6, 7, 8 (nodo3 cayó en la play 2).
+          # Las tandas se calculan sobre la lista original: [1,2,(3),4] y
+          # [5,6,7,8]. Todos hacen la tarea 1...
+          - hechos['fatal-t1'] == [1, 2, 4, 5, 6, 7, 8]
+          # ...nodo2 falla en la tarea 2 y sus compañeros de tanda (nodo1,
+          # nodo4) ya no llegan a la tarea 3 — pero la tanda siguiente
+          # arranca de cero y la completa entera.
+          - hechos['fatal-t2'] == [5, 6, 7, 8]
+        success_msg: >-
+          any_errors_fatal: el primer fallo (nodo2) cortó SU tanda — nodo1 y
+          nodo4 no hicieron la tarea 2 — pero la tanda siguiente
+          ({{ hechos['fatal-t2'] }}) corrió entera: es un freno por tanda, no
+          por playbook; para parar todo, max_fail_percentage: 0.
+        fail_msg: "any_errors_fatal no se comportó como se midió: {{ hechos }}"
+
+    - name: Dejar la marca final para el CI (todas las escenas pasaron)
+      ansible.builtin.copy:
+        dest: /tmp/ansible-lab-39/TODAS-LAS-ESCENAS-OK
+        content: "ok\n"
+        mode: "0644"
+      changed_when: false
