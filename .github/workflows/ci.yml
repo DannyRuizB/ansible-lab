@@ -316,6 +316,14 @@ jobs:
           ansible-playbook playbooks/42_estrategias_a_fondo.yml
           test -f /tmp/ansible-lab-42/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
 
+      # block/rescue/always: el catch recupera el host (el play sigue), always
+      # es el finally (corre pase lo que pase), y un rescue que tambien falla
+      # hunde el host de verdad — esto ultimo en una orden anidada (rc 2).
+      - name: "Playbook 43 — block/rescue/always a fondo (asserts incluidos)"
+        run: |
+          ansible-playbook playbooks/43_rescue_a_fondo.yml
+          test -f /tmp/ansible-lab-43/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \

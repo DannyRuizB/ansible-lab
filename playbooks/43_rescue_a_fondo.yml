@@ -1,0 +1,200 @@
+# =============================================================================
+# Playbook 43 — block / rescue / always a fondo: el try/catch/finally de
+# Ansible, y lo que de verdad cuenta como "recuperado"
+#
+# Un `block` agrupa tareas; `rescue` es su catch y `always` su finally. La
+# sorpresa no es que existan, sino qué le pasa al HOST: un rescue que termina
+# bien RECUPERA al host (el play sigue como si nada), pero un rescue que falla
+# lo hunde de verdad. Todo medido contra ansible-core 2.21:
+#
+#   - Escena 1 (el catch): una tarea del block falla -> las tareas restantes
+#     del block se SALTAN, corre `rescue`, y dentro de rescue
+#     `ansible_failed_task.name` y `ansible_failed_result.msg` nombran qué
+#     petó. `always` corre. Y lo importante: tras un rescue exitoso el host
+#     queda RECUPERADO — la tarea siguiente del play corre y el recap dice
+#     rescued=1, failed=0.
+#
+#   - Escena 2 (sin catch): si el block NO falla, `rescue` no se ejecuta y
+#     `always` sí. always es el finally: corre pase lo que pase.
+#
+#   - Escena 3 (el catch que también peta): si una tarea de `rescue` falla,
+#     el host FALLA de verdad (las tareas posteriores del play se saltan),
+#     pero `always` corre igual. Medido en una orden anidada: rc 2,
+#     recap failed=1 rescued=1, la marca de "después" ausente y la de always
+#     presente.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/43_rescue_a_fondo.yml
+# ...el CI lo ejecuta esperando rc 0 y comprobando la marca final.
+# =============================================================================
+
+- name: "Rescue 0 — escenario limpio"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Empezar con el directorio de marcas vacio
+      ansible.builtin.file:
+        path: /tmp/ansible-lab-43
+        state: "{{ item }}"
+        mode: "0755"
+      loop: [absent, directory]
+      changed_when: false
+
+- name: "Rescue 1 — el catch recupera el host; always es el finally"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Un block que falla a la mitad
+      block:
+        - name: Primera tarea del block (corre)
+          ansible.builtin.copy:
+            dest: /tmp/ansible-lab-43/s1-block1.txt
+            content: "ok"
+            mode: "0644"
+          changed_when: false
+        - name: La tarea que peta
+          ansible.builtin.fail:
+            msg: "boom en el block"
+        - name: Tarea posterior del block (NO debe correr)
+          ansible.builtin.copy:
+            dest: /tmp/ansible-lab-43/s1-block2.txt
+            content: "no deberia"
+            mode: "0644"
+          changed_when: false
+      rescue:
+        - name: El rescue nombra lo que peto
+          ansible.builtin.copy:
+            dest: /tmp/ansible-lab-43/s1-rescue.txt
+            content: "failed_task={{ ansible_failed_task.name }} | msg={{ ansible_failed_result.msg }}"
+            mode: "0644"
+          changed_when: false
+      always:
+        - name: El always corre siempre
+          ansible.builtin.copy:
+            dest: /tmp/ansible-lab-43/s1-always.txt
+            content: "always"
+            mode: "0644"
+          changed_when: false
+
+    - name: Tras un rescue exitoso, el play SIGUE
+      ansible.builtin.copy:
+        dest: /tmp/ansible-lab-43/s1-after.txt
+        content: "el play siguio"
+        mode: "0644"
+      changed_when: false
+
+    - name: Un block que NO falla
+      block:
+        - name: Unica tarea del block (corre)
+          ansible.builtin.copy:
+            dest: /tmp/ansible-lab-43/s2-block.txt
+            content: "ok"
+            mode: "0644"
+          changed_when: false
+      rescue:
+        - name: Este rescue NO debe correr
+          ansible.builtin.copy:
+            dest: /tmp/ansible-lab-43/s2-rescue.txt
+            content: "no deberia"
+            mode: "0644"
+          changed_when: false
+      always:
+        - name: Este always SI corre
+          ansible.builtin.copy:
+            dest: /tmp/ansible-lab-43/s2-always.txt
+            content: "always"
+            mode: "0644"
+          changed_when: false
+
+    - name: "Escena 1 — block fallido: resto saltado, rescue con ansible_failed_task, always, host recuperado"
+      ansible.builtin.assert:
+        that:
+          - "'s1-block1.txt' in lookup('ansible.builtin.fileglob', '/tmp/ansible-lab-43/s1-block1.txt', wantlist=true) | map('basename') | list"
+          - not (lookup('ansible.builtin.fileglob', '/tmp/ansible-lab-43/s1-block2.txt', wantlist=true) | length)
+          - (lookup('ansible.builtin.file', '/tmp/ansible-lab-43/s1-rescue.txt')) == 'failed_task=La tarea que peta | msg=boom en el block'
+          - (lookup('ansible.builtin.file', '/tmp/ansible-lab-43/s1-always.txt')) == 'always'
+          - (lookup('ansible.builtin.file', '/tmp/ansible-lab-43/s1-after.txt')) == 'el play siguio'
+        success_msg: >-
+          block fallido: la tarea posterior se salto, rescue leyo
+          ansible_failed_task.name ("La tarea que peta") y ansible_failed_result.msg
+          ("boom en el block"), always corrio, y el play siguio — el host quedo recuperado.
+        fail_msg: "block/rescue no se comporto como se midio (escena 1)"
+
+    - name: "Escena 2 — block sin fallo: rescue no corre, always si"
+      ansible.builtin.assert:
+        that:
+          - (lookup('ansible.builtin.file', '/tmp/ansible-lab-43/s2-block.txt')) == 'ok'
+          - not (lookup('ansible.builtin.fileglob', '/tmp/ansible-lab-43/s2-rescue.txt', wantlist=true) | length)
+          - (lookup('ansible.builtin.file', '/tmp/ansible-lab-43/s2-always.txt')) == 'always'
+        success_msg: "block sin fallo: rescue NO corrio, always SI — always es el finally, corra o no el catch."
+        fail_msg: "always/rescue no se comporto como se midio (escena 2)"
+
+- name: "Rescue 2 — el catch que tambien peta hunde el host, pero always corre (orden anidada)"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    entorno_43:
+      ANSIBLE_VAULT_PASSWORD_FILE: /tmp/ansible-lab-43/vault_pass
+  tasks:
+    - name: Dejar un fichero de vault (sin uso) para el ansible anidado
+      ansible.builtin.copy:
+        content: "sin-uso\n"
+        dest: "{{ entorno_43.ANSIBLE_VAULT_PASSWORD_FILE }}"
+        mode: "0600"
+      changed_when: false
+
+    - name: Escribir el playbook interior (rescue que falla)
+      changed_when: false
+      ansible.builtin.copy:
+        dest: /tmp/ansible-lab-43/inner.yml
+        mode: "0644"
+        content: |
+          - hosts: localhost
+            gather_facts: false
+            tasks:
+              - name: block+rescue donde el rescue tambien peta
+                block:
+                  - ansible.builtin.fail: { msg: primer fallo }
+                rescue:
+                  - name: el rescue entro
+                    ansible.builtin.copy: { dest: /tmp/ansible-lab-43/s3-rescue.txt, content: entro, mode: "0644" }
+                    changed_when: false
+                  - name: y el rescue tambien peta
+                    ansible.builtin.fail: { msg: rescue tambien peta }
+                always:
+                  - name: always corre igual
+                    ansible.builtin.copy: { dest: /tmp/ansible-lab-43/s3-always.txt, content: corrio, mode: "0644" }
+                    changed_when: false
+              - name: esta tarea NO debe correr (el host ya fallo)
+                ansible.builtin.copy: { dest: /tmp/ansible-lab-43/s3-after.txt, content: no, mode: "0644" }
+                changed_when: false
+
+    - name: "Correr el interior (se espera rc 2: el rescue falla)"
+      ansible.builtin.command:
+        cmd: ansible-playbook /tmp/ansible-lab-43/inner.yml
+      register: inner_run
+      changed_when: false
+      failed_when: false
+      environment: "{{ entorno_43 }}"
+
+    - name: "Escena 3 — rescue que falla: rc 2, always corrio, la tarea posterior se salto"
+      ansible.builtin.assert:
+        that:
+          - inner_run.rc == 2
+          - (lookup('ansible.builtin.file', '/tmp/ansible-lab-43/s3-rescue.txt')) == 'entro'
+          - (lookup('ansible.builtin.file', '/tmp/ansible-lab-43/s3-always.txt')) == 'corrio'
+          - not (lookup('ansible.builtin.fileglob', '/tmp/ansible-lab-43/s3-after.txt', wantlist=true) | length)
+          - inner_run.stdout is search('rescued=1')
+          - inner_run.stdout is search('failed=1')
+        success_msg: >-
+          rescue que peta: el host fallo de verdad (rc {{ inner_run.rc }}, recap failed=1
+          rescued=1), la tarea posterior se salto — pero always corrio igual. always es
+          el finally de verdad: corre aunque el catch se hunda.
+        fail_msg: "el rescue-que-falla no se comporto como se midio (escena 3): rc={{ inner_run.rc }}"
+
+    - name: Dejar la marca final para el CI (todas las escenas pasaron)
+      ansible.builtin.copy:
+        dest: /tmp/ansible-lab-43/TODAS-LAS-ESCENAS-OK
+        content: "ok\n"
+        mode: "0644"
+      changed_when: false
