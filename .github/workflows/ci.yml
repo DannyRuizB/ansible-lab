@@ -288,6 +288,16 @@ jobs:
           [ "$rc" -eq 2 ] || { echo "::error::rc $rc (se esperaba 2: fallos deliberados en nodo3 y nodo2)"; exit 1; }
           test -f /tmp/ansible-lab-39/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
 
+      # inventario en caliente: add_host corre una vez por play y se ve al
+      # instante, group_by corre por host, refresh_inventory relee el fichero
+      # (y conserva los hosts en memoria) y clear_host_errors readmite al
+      # caído solo para las plays siguientes dejando rc 0. Los fallos viven
+      # en órdenes anidadas, así que el rc esperado aquí es 0.
+      - name: "Playbook 40 — inventario en caliente (asserts incluidos)"
+        run: |
+          ansible-playbook playbooks/40_inventario_en_caliente_a_fondo.yml
+          test -f /tmp/ansible-lab-40/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \

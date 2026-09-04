@@ -1,0 +1,381 @@
+# =============================================================================
+# Playbook 40 — inventario en caliente a fondo: `add_host`, `group_by`,
+# `refresh_inventory` y `clear_host_errors` (lo que cambia la lista de hosts
+# MIENTRAS el playbook corre)
+#
+# El inventario no es una foto fija: hay hosts que nacen a mitad de playbook
+# (la VM que acabas de crear), grupos que solo se conocen tras mirar los facts
+# (que servidores tienen el disco X), ficheros de inventario que cambian
+# mientras ansible trabaja, y hosts que fallan y hay que readmitir. Cuatro
+# palancas, TODAS medidas contra ansible-core 2.21 antes de escribir el
+# playbook, sobre una flota FALSA de alias de localhost (sin Docker ni SSH):
+#
+#   - Escena 1 (add_host): `add_host` es una accion "bypass host loop": en una
+#     play de TRES hosts corre UNA sola vez (la del primer host de la lista),
+#     no una por host — medido: con `name: extra-{{ inventory_hostname }}`
+#     aparece un unico `extra-nodo1`, nunca extra-nodo2/3. Y el host y su
+#     grupo se ven AL INSTANTE en `groups` dentro de la misma play (los tres
+#     hosts leen groups['nuevo40'] == ['extra-nodo1']); como destino de
+#     `hosts:` solo vale en las plays SIGUIENTES.
+#
+#   - Escena 2 (group_by): al reves que add_host, `group_by` corre POR HOST
+#     (medido: tres ejecuciones en la play de tres) y mete a cada uno en el
+#     grupo que dicte su variable/fact — la forma de decir "hosts: los que
+#     tengan X" cuando X solo se sabe en tiempo de ejecucion. Los grupos
+#     existen para las plays siguientes.
+#
+#   - Escena 3 (refresh_inventory): un fichero de inventario que cambia
+#     durante el playbook NO se relee solo — `groups` sigue viendo la foto
+#     del arranque hasta un `meta: refresh_inventory`, que vuelve a parsear
+#     las fuentes. Medido con una orden anidada (`-i` a un fichero YAML que
+#     el propio playbook amplia): antes del refresh dyn=['dinA'], despues
+#     dyn=['dinA','dinB'], y la play siguiente sobre `dyn` corre en los dos.
+#     Y lo que NO pasa, contra lo que suele creerse: los hosts añadidos con
+#     add_host SOBREVIVEN al refresh (2.21 los conserva), no hay que
+#     re-añadirlos.
+#
+#   - Escena 4 (clear_host_errors): un host que FALLA sale de las plays
+#     siguientes (lo midio el playbook 39) y el playbook acaba con rc 2.
+#     `meta: clear_host_errors` lo READMITE — pero solo para las plays
+#     siguientes: en la misma play el host caido ya no recibe las tareas que
+#     quedan (medido: tras el meta solo nodo1 y nodo3 hacen la tarea final;
+#     en la play siguiente vuelven los tres). Y el detalle que importa en un
+#     CI: con el error limpiado el playbook acaba con rc 0 aunque el RECAP
+#     siga diciendo failed=1 para ese host. Medido con dos ordenes anidadas
+#     identicas salvo el meta: sin el, rc 2 y [nodo1, nodo3]; con el, rc 0 y
+#     [nodo1, nodo2, nodo3].
+#
+# Cada escena termina en un `assert` con lo medido; las que necesitan medir
+# un rc o una relectura de inventario van en ordenes ANIDADAS (el idiom de
+# los playbooks 28/29/35/37/38/39), escritas en /tmp/ansible-lab-40.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/40_inventario_en_caliente_a_fondo.yml
+# ...el CI lo ejecuta esperando rc 0 y comprobando la marca final.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# PLAY 0 — la flota falsa: tres alias del propio localhost, en memoria
+# -----------------------------------------------------------------------------
+- name: "Inventario 0 — fabricar una flota de tres hosts en memoria y limpiar el escenario"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Empezar con el directorio de marcas vacio
+      ansible.builtin.file:
+        path: /tmp/ansible-lab-40
+        state: "{{ item }}"
+        mode: "0755"
+      loop: [absent, directory]
+      changed_when: false
+
+    - name: Añadir tres alias de localhost al grupo flota40 (dos web, uno db)
+      ansible.builtin.add_host:
+        name: "nodo{{ item }}"
+        groups: flota40
+        tier: "{{ 'web' if item in [1, 2] else 'db' }}"
+        ansible_connection: local
+        ansible_python_interpreter: "{{ ansible_playbook_python }}"
+      loop: [1, 2, 3]
+      changed_when: false
+
+# -----------------------------------------------------------------------------
+# ESCENA 1 + 2 — add_host corre UNA vez y se ve al instante; group_by, por host
+# -----------------------------------------------------------------------------
+- name: "Inventario 1 — add_host desde una play de tres hosts, y group_by por tier"
+  hosts: flota40
+  gather_facts: false
+  tasks:
+    - name: Add_host con el nombre del host que lo ejecuta (si corriera por host habria tres)
+      ansible.builtin.add_host:
+        name: "extra-{{ inventory_hostname }}"
+        groups: nuevo40
+        ansible_connection: local
+        ansible_python_interpreter: "{{ ansible_playbook_python }}"
+      changed_when: false
+
+    - name: "Escena 1 — add_host corrio una sola vez y el grupo ya se ve en ESTA play"
+      ansible.builtin.assert:
+        that:
+          - groups['nuevo40'] == ['extra-nodo1']
+          - "'extra-nodo1' in groups['all']"
+        success_msg: >-
+          {{ inventory_hostname }} ve groups['nuevo40'] = {{ groups['nuevo40'] }}:
+          un solo host (add_host corrio para el primer host y ya no para los
+          demas) y visible al instante, sin esperar a la play siguiente.
+        fail_msg: "add_host no se comporto como se midio: nuevo40 = {{ groups['nuevo40'] | default('AUSENTE') }}"
+
+    - name: Group_by por tier — esta SI corre por host
+      ansible.builtin.group_by:
+        key: "tier40_{{ tier }}"
+      changed_when: false
+
+- name: "Inventario 2 — la play siguiente ya puede APUNTAR al host nuevo y a los grupos de group_by"
+  hosts: nuevo40
+  gather_facts: false
+  tasks:
+    - name: "Escena 2 — group_by agrupo por host: dos web y un db; y hosts: nuevo40 resuelve al host añadido"
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname == 'extra-nodo1'
+          - groups['tier40_web'] | sort == ['nodo1', 'nodo2']
+          - groups['tier40_db'] == ['nodo3']
+        success_msg: >-
+          Esta play corre en {{ inventory_hostname }} (el host de add_host) y ve
+          tier40_web = {{ groups['tier40_web'] }}, tier40_db = {{ groups['tier40_db'] }}:
+          group_by corrio en cada host y coloco a cada uno segun su variable.
+        fail_msg: "group_by no se comporto como se midio: {{ groups }}"
+
+# -----------------------------------------------------------------------------
+# ESCENA 3 — refresh_inventory: el fichero cambia en caliente (orden anidada)
+# -----------------------------------------------------------------------------
+- name: "Inventario 3 — refresh_inventory relee las fuentes; los hosts en memoria sobreviven"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    entorno_40:
+      ANSIBLE_VAULT_PASSWORD_FILE: /tmp/ansible-lab-40/vault_pass
+  tasks:
+    - name: Dejar un fichero de vault (sin uso) para el ansible anidado
+      ansible.builtin.copy:
+        content: "sin-uso\n"
+        dest: "{{ entorno_40.ANSIBLE_VAULT_PASSWORD_FILE }}"
+        mode: "0600"
+      changed_when: false
+
+    - name: Fichero de inventario inicial con un solo host (dinA)
+      ansible.builtin.copy:
+        dest: /tmp/ansible-lab-40/inv.yml
+        mode: "0644"
+        content: |
+          dyn:
+            hosts:
+              dinA:
+                ansible_connection: local
+                ansible_python_interpreter: "{{ '{{' }} ansible_playbook_python {{ '}}' }}"
+      changed_when: false
+
+    - name: Escribir el playbook interior (amplia el fichero, refresca, y una play sobre dyn)
+      changed_when: false
+      ansible.builtin.copy:
+        dest: /tmp/ansible-lab-40/refresh.yml
+        mode: "0644"
+        content: |
+          - name: un host en memoria y la ampliacion del fichero
+            hosts: localhost
+            gather_facts: false
+            tasks:
+              - name: Host en memoria (para ver si el refresh se lo lleva)
+                ansible.builtin.add_host:
+                  name: memoria40
+                  groups: enmemoria
+                  ansible_connection: local
+                  ansible_python_interpreter: "{{ '{{' }} ansible_playbook_python {{ '}}' }}"
+                changed_when: false
+              - name: Marca ANTES
+                ansible.builtin.copy:
+                  dest: /tmp/ansible-lab-40/refresh-antes
+                  content: "{{ '{{' }} groups['dyn'] | join(',') {{ '}}' }}"
+                  mode: "0644"
+                changed_when: false
+              - name: Ampliar el fichero de inventario con dinB (el fichero cambia en caliente)
+                ansible.builtin.copy:
+                  dest: /tmp/ansible-lab-40/inv.yml
+                  mode: "0644"
+                  content: |
+                    dyn:
+                      hosts:
+                        dinA:
+                          ansible_connection: local
+                          ansible_python_interpreter: "{{ '{{' }} '{{' {{ '}}' }} ansible_playbook_python {{ '{{' }} '}}' {{ '}}' }}"
+                        dinB:
+                          ansible_connection: local
+                          ansible_python_interpreter: "{{ '{{' }} '{{' {{ '}}' }} ansible_playbook_python {{ '{{' }} '}}' {{ '}}' }}"
+                changed_when: false
+              - name: Marca SIN refresh (groups sigue con la foto del arranque)
+                ansible.builtin.copy:
+                  dest: /tmp/ansible-lab-40/refresh-sin
+                  content: "{{ '{{' }} groups['dyn'] | join(',') {{ '}}' }}"
+                  mode: "0644"
+                changed_when: false
+              - name: Releer las fuentes de inventario
+                ansible.builtin.meta: refresh_inventory
+              - name: Marca TRAS refresh (dyn ampliado; el host en memoria sigue)
+                ansible.builtin.copy:
+                  dest: /tmp/ansible-lab-40/refresh-tras
+                  content: "{{ '{{' }} groups['dyn'] | join(',') {{ '}}' }}|memoria={{ '{{' }} 'memoria40' in groups['all'] {{ '}}' }}"
+                  mode: "0644"
+                changed_when: false
+          - name: la play siguiente sobre dyn corre en los dos hosts
+            hosts: dyn
+            gather_facts: false
+            tasks:
+              - name: Marca por host
+                ansible.builtin.copy:
+                  dest: "/tmp/ansible-lab-40/refresh-play-{{ '{{' }} inventory_hostname {{ '}}' }}"
+                  content: "ok"
+                  mode: "0644"
+                changed_when: false
+
+    - name: Correr el interior con -i al fichero que el mismo amplia
+      ansible.builtin.command:
+        cmd: ansible-playbook -i /tmp/ansible-lab-40/inv.yml /tmp/ansible-lab-40/refresh.yml
+      register: refresh_run
+      changed_when: false
+      failed_when: false
+      environment: "{{ entorno_40 }}"
+
+    - name: Leer las marcas del interior
+      ansible.builtin.slurp:
+        src: "/tmp/ansible-lab-40/refresh-{{ item }}"
+      loop: [antes, sin, tras]
+      register: marcas_refresh
+
+    - name: Hosts en los que corrio la play sobre dyn
+      ansible.builtin.find:
+        paths: /tmp/ansible-lab-40
+        patterns: "refresh-play-*"
+      register: play_dyn
+
+    - name: "Escena 3 — el fichero cambiado no se ve hasta refresh_inventory; tras el, dyn tiene dos hosts y el de memoria sigue"
+      ansible.builtin.assert:
+        that:
+          - refresh_run.rc == 0
+          - (marcas_refresh.results[0].content | b64decode) == 'dinA'
+          - (marcas_refresh.results[1].content | b64decode) == 'dinA'
+          - (marcas_refresh.results[2].content | b64decode) == 'dinA,dinB|memoria=True'
+          - play_dyn.files | map(attribute='path') | map('basename') | sort == ['refresh-play-dinA', 'refresh-play-dinB']
+        success_msg: >-
+          Antes: dinA. Con el fichero ya ampliado pero sin refresh: dinA (la foto
+          del arranque). Tras meta: refresh_inventory: dinA,dinB — y memoria40, el
+          host de add_host, sigue en groups['all'] (el refresh no se lo lleva).
+          La play siguiente sobre dyn corrio en {{ play_dyn.files | length }} hosts.
+        fail_msg: >-
+          refresh_inventory no se comporto como se midio: rc={{ refresh_run.rc }}
+          marcas={{ marcas_refresh.results | map(attribute='content') | map('b64decode') | list }}
+          play={{ play_dyn.files | map(attribute='path') | list }}
+          salida={{ refresh_run.stdout_lines[-6:] | default([]) }}
+
+# -----------------------------------------------------------------------------
+# ESCENA 4 — clear_host_errors: dos ordenes anidadas identicas salvo el meta
+# -----------------------------------------------------------------------------
+- name: "Inventario 4 — el host caido: fuera de las plays siguientes salvo clear_host_errors (que ademas deja rc 0)"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    entorno_40:
+      ANSIBLE_VAULT_PASSWORD_FILE: /tmp/ansible-lab-40/vault_pass
+    interior_caida: |
+      - name: flota de tres
+        hosts: localhost
+        gather_facts: false
+        tasks:
+          - name: Tres alias de localhost
+            ansible.builtin.add_host:
+              name: "nodo{{ '{{' }} item {{ '}}' }}"
+              groups: flota40i
+              ansible_connection: local
+              ansible_python_interpreter: "{{ '{{' }} ansible_playbook_python {{ '}}' }}"
+            loop: [1, 2, 3]
+            changed_when: false
+      - name: nodo2 falla; la play sigue para los demas
+        hosts: flota40i
+        gather_facts: false
+        tasks:
+          - name: nodo2 cae a proposito
+            ansible.builtin.fail:
+              msg: "fallo deliberado en {{ '{{' }} inventory_hostname {{ '}}' }}"
+            when: inventory_hostname == 'nodo2'
+          - name: Marca de la misma play, tras el fallo
+            ansible.builtin.copy:
+              dest: "/tmp/ansible-lab-40/VARIANTE-misma-{{ '{{' }} inventory_hostname {{ '}}' }}"
+              content: "ok"
+              mode: "0644"
+            changed_when: false
+          META_O_NADA
+          - name: Marca de la misma play, tras el punto del meta
+            ansible.builtin.copy:
+              dest: "/tmp/ansible-lab-40/VARIANTE-trasmeta-{{ '{{' }} inventory_hostname {{ '}}' }}"
+              content: "ok"
+              mode: "0644"
+            changed_when: false
+      - name: la play siguiente — quien sigue en la lista
+        hosts: flota40i
+        gather_facts: false
+        tasks:
+          - name: Marca de la play siguiente
+            ansible.builtin.copy:
+              dest: "/tmp/ansible-lab-40/VARIANTE-siguiente-{{ '{{' }} inventory_hostname {{ '}}' }}"
+              content: "ok"
+              mode: "0644"
+            changed_when: false
+  tasks:
+    - name: Escribir las dos variantes del interior (sin y con clear_host_errors)
+      ansible.builtin.copy:
+        dest: "/tmp/ansible-lab-40/caida-{{ item.nombre }}.yml"
+        mode: "0644"
+        content: "{{ interior_caida | replace('VARIANTE', item.nombre) | replace('META_O_NADA', item.meta) }}"
+      loop:
+        - { nombre: sinclear, meta: "" }
+        # El bloque `|` de interior_caida queda desindentado: las tareas van a 4
+        # espacios y sus claves a 6, y el meta tiene que caer justo ahi.
+        - { nombre: conclear, meta: "- name: Limpiar los errores de host\n      ansible.builtin.meta: clear_host_errors" }
+      loop_control:
+        label: "{{ item.nombre }}"
+      changed_when: false
+
+    - name: Correr las dos variantes (el rc es parte de la medida)
+      ansible.builtin.command:
+        cmd: "ansible-playbook /tmp/ansible-lab-40/caida-{{ item }}.yml"
+      loop: [sinclear, conclear]
+      register: caida_runs
+      changed_when: false
+      failed_when: false
+      environment: "{{ entorno_40 }}"
+
+    - name: Recoger las marcas de cada variante
+      ansible.builtin.find:
+        paths: /tmp/ansible-lab-40
+        patterns: "{{ item }}-*"
+      loop: [sinclear-misma, sinclear-trasmeta, sinclear-siguiente, conclear-misma, conclear-trasmeta, conclear-siguiente]
+      register: marcas_caida
+
+    - name: Resumir en un diccionario patron → hosts
+      ansible.builtin.set_fact:
+        caidos: >-
+          {{ caidos | default({}) | combine({ item.item: item.files | map(attribute='path') | map('basename')
+             | map('regex_replace', '^[a-z-]+-nodo', '') | map('int') | sort }) }}
+      loop: "{{ marcas_caida.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: "Escena 4 — sin clear: nodo2 fuera y rc 2; con clear: fuera de la MISMA play pero de vuelta en la siguiente, y rc 0"
+      ansible.builtin.assert:
+        that:
+          - caida_runs.results[0].rc == 2
+          - caida_runs.results[1].rc == 0
+          - caidos['sinclear-misma'] == [1, 3]
+          - caidos['sinclear-trasmeta'] == [1, 3]
+          - caidos['sinclear-siguiente'] == [1, 3]
+          - caidos['conclear-misma'] == [1, 3]
+          - caidos['conclear-trasmeta'] == [1, 3]
+          - caidos['conclear-siguiente'] == [1, 2, 3]
+        success_msg: >-
+          Sin clear_host_errors: nodo2 desaparece de la play siguiente
+          ({{ caidos['sinclear-siguiente'] }}) y el playbook acaba con rc
+          {{ caida_runs.results[0].rc }}. Con meta: clear_host_errors: en la misma
+          play nodo2 no vuelve ({{ caidos['conclear-trasmeta'] }} hacen la tarea
+          posterior al meta), pero en la play siguiente estan los tres
+          ({{ caidos['conclear-siguiente'] }}) y el playbook acaba con rc
+          {{ caida_runs.results[1].rc }} aunque el recap siga contando failed=1.
+        fail_msg: >-
+          clear_host_errors no se comporto como se midio: {{ caidos }}
+          rcs={{ caida_runs.results | map(attribute='rc') | list }}
+          salida_con={{ caida_runs.results[1].stdout_lines[-6:] | default([]) }}
+
+    - name: Dejar la marca final para el CI (todas las escenas pasaron)
+      ansible.builtin.copy:
+        dest: /tmp/ansible-lab-40/TODAS-LAS-ESCENAS-OK
+        content: "ok\n"
+        mode: "0644"
+      changed_when: false
