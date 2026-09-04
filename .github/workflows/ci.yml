@@ -298,6 +298,15 @@ jobs:
           ansible-playbook playbooks/40_inventario_en_caliente_a_fondo.yml
           test -f /tmp/ansible-lab-40/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
 
+      # delegación: run_once corre una vez y su register lo ven todos; la
+      # tarea delegada usa las variables del host original; set_fact delegado
+      # cae en el original salvo delegate_facts; local_action corre por host;
+      # el fan-out (loop + delegate_to item + run_once) sale una vez de nodo1.
+      - name: "Playbook 41 — delegación a fondo (asserts incluidos)"
+        run: |
+          ansible-playbook playbooks/41_delegacion_a_fondo.yml
+          test -f /tmp/ansible-lab-41/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \

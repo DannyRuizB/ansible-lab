@@ -1,0 +1,195 @@
+# =============================================================================
+# Playbook 41 — delegacion a fondo: `delegate_to`, `run_once`, `delegate_facts`
+# y el fan-out (DONDE corre de verdad cada tarea y QUE variables ve)
+#
+# "Esta tarea tiene que correr en el balanceador, pero para cada web"; "esto
+# solo una vez, no por cada host"; "guarda el resultado en el host que lo
+# ejecuto, no en el que lo pidio". Cuatro palancas cuya trampa comun es la
+# misma: la tarea CORRE en un sitio y su CONTEXTO (variables, facts, register)
+# pertenece a otro. Todo medido contra ansible-core 2.21 sobre la flota falsa
+# de alias de localhost (dos web, un db):
+#
+#   - Escena 1 (run_once): la tarea corre UNA vez, en el primer host de la
+#     lista de la play, y su `register` se COPIA a todos — medido: los tres
+#     hosts leen el mismo `ro.stdout` ("corrio en nodo1"). Es la forma de
+#     hacer algo por play (una migracion, un aviso) sin `when:
+#     inventory_hostname == ...`.
+#
+#   - Escena 2 (delegate_to): la tarea se EJECUTA en el delegado, pero la
+#     plantilla se rinde con las variables del host ORIGINAL — medido:
+#     delegando a nodo3 (db) desde nodo1 (web), `{{ inventory_hostname }}` es
+#     nodo1 y `{{ tier }}` es web; las del delegado se leen por
+#     `hostvars['nodo3']`, y `ansible_delegated_vars` existe solo dentro de
+#     una tarea delegada. La regla: variables del que PIDE, conexion del que
+#     EJECUTA.
+#
+#   - Escena 3 (delegate_facts): un `set_fact` delegado se guarda en el host
+#     ORIGINAL — medido: sin `delegate_facts`, cada host acaba con su propia
+#     `marca_c` aunque la tarea corriera en nodo3. Con `delegate_facts: true`
+#     el hecho se guarda en el DELEGADO: nodo1 y nodo2 no lo tienen, nodo3 si,
+#     y como los tres lo escribieron sobre nodo3, gana el ULTIMO (nodo3).
+#
+#   - Escena 4 (delegate_to: localhost = local_action): corre en el
+#     controlador pero POR CADA HOST de la play (medido: 3 ejecuciones) —
+#     no es un run_once. Y el fan-out: `loop: groups[...]` + `delegate_to:
+#     "{{ item }}"` + `run_once` corre una sola vez desde el primer host y
+#     manda cada vuelta a su destino; `register` recoge las 3 salidas y todos
+#     los hosts las ven.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/41_delegacion_a_fondo.yml
+# ...el CI lo ejecuta esperando rc 0 y comprobando la marca final.
+# =============================================================================
+
+- name: "Delegacion 0 — la flota falsa (dos web, un db) y el escenario limpio"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Empezar con el directorio de marcas vacio
+      ansible.builtin.file:
+        path: /tmp/ansible-lab-41
+        state: "{{ item }}"
+        mode: "0755"
+      loop: [absent, directory]
+      changed_when: false
+
+    - name: Añadir tres alias de localhost al grupo flota41
+      ansible.builtin.add_host:
+        name: "nodo{{ item }}"
+        groups: flota41
+        tier: "{{ 'web' if item in [1, 2] else 'db' }}"
+        ansible_connection: local
+        ansible_python_interpreter: "{{ ansible_playbook_python }}"
+      loop: [1, 2, 3]
+      changed_when: false
+
+- name: "Delegacion 1 — run_once, delegate_to, delegate_facts y el fan-out, medidos"
+  hosts: flota41
+  gather_facts: false
+  tasks:
+    # ---- Escena 1: run_once ------------------------------------------------
+    - name: Una tarea run_once dice quien la ejecuto
+      ansible.builtin.command: echo "corrio en {{ inventory_hostname }}"
+      run_once: true
+      register: ro
+      changed_when: false
+
+    - name: "Escena 1 — run_once corrio una vez (en el primer host) y su register lo ven todos"
+      ansible.builtin.assert:
+        that:
+          - ro.stdout == 'corrio en nodo1'
+        success_msg: >-
+          {{ inventory_hostname }} lee ro.stdout = "{{ ro.stdout }}": la tarea corrio
+          una sola vez, en el primer host de la play, y ansible copio el resultado
+          a los tres — sin when: inventory_hostname == ....
+        fail_msg: "run_once no se comporto como se midio en {{ inventory_hostname }}: {{ ro.stdout }}"
+
+    # ---- Escena 2: delegate_to ---------------------------------------------
+    - name: Una tarea delegada a nodo3 dice que ve
+      ansible.builtin.command: >-
+        echo "inv={{ inventory_hostname }} tier={{ tier }}
+        delegado_tier={{ hostvars['nodo3'].tier }}
+        delegated_vars={{ ansible_delegated_vars is defined }}"
+      delegate_to: nodo3
+      register: dl
+      changed_when: false
+
+    - name: "Escena 2 — la tarea corre en el delegado pero la plantilla es del host original"
+      ansible.builtin.assert:
+        that:
+          - dl.stdout is search('inv=' ~ inventory_hostname ~ ' ')
+          - dl.stdout is search('tier=' ~ tier ~ ' ')
+          - dl.stdout is search('delegado_tier=db')
+          - dl.stdout is search('delegated_vars=True')
+          - ansible_delegated_vars is not defined
+        success_msg: >-
+          Delegada a nodo3 desde {{ inventory_hostname }}: inventory_hostname y tier
+          siguen siendo los de {{ inventory_hostname }} ({{ tier }}); lo de nodo3
+          (tier db) se lee por hostvars['nodo3']; ansible_delegated_vars existe
+          dentro de la tarea delegada y no fuera. Variables del que pide,
+          conexion del que ejecuta.
+        fail_msg: "delegate_to no se comporto como se midio: {{ dl.stdout }}"
+
+    # ---- Escena 3: delegate_facts ------------------------------------------
+    - name: Set_fact delegado SIN delegate_facts
+      ansible.builtin.set_fact:
+        marca_c: "puesta desde {{ inventory_hostname }}"
+      delegate_to: nodo3
+
+    - name: Set_fact delegado CON delegate_facts
+      ansible.builtin.set_fact:
+        marca_c2: "puesta desde {{ inventory_hostname }}"
+      delegate_to: nodo3
+      delegate_facts: true
+
+    # ---- Escena 4: local_action y fan-out ----------------------------------
+    - name: Una tarea delegada al controlador (local_action) deja una marca por host
+      ansible.builtin.copy:
+        dest: "/tmp/ansible-lab-41/local-{{ inventory_hostname }}"
+        content: "ok"
+        mode: "0644"
+      delegate_to: localhost
+      changed_when: false
+
+    - name: Fan-out — una tarea, run_once, que recorre el grupo delegando cada vuelta
+      ansible.builtin.command: echo "desde {{ inventory_hostname }} hacia {{ item }}"
+      loop: "{{ groups['flota41'] }}"
+      delegate_to: "{{ item }}"
+      run_once: true
+      register: fo
+      changed_when: false
+
+    - name: "Escena 4 — el fan-out corrio una vez desde nodo1, una vuelta por destino, y todos ven las tres salidas"
+      ansible.builtin.assert:
+        that:
+          - fo.results | map(attribute='stdout') | list == ['desde nodo1 hacia nodo1', 'desde nodo1 hacia nodo2', 'desde nodo1 hacia nodo3']
+        success_msg: >-
+          {{ inventory_hostname }} ve las tres vueltas del fan-out:
+          {{ fo.results | map(attribute='stdout') | join(' / ') }}. run_once fijo el
+          origen (nodo1); delegate_to: item mando cada vuelta a su destino.
+        fail_msg: "el fan-out no se comporto como se midio: {{ fo.results | map(attribute='stdout') | list }}"
+
+- name: "Delegacion 2 — donde acabaron los hechos y las marcas"
+  hosts: flota41
+  gather_facts: false
+  tasks:
+    - name: Contar las marcas de la tarea delegada al controlador
+      ansible.builtin.find:
+        paths: /tmp/ansible-lab-41
+        patterns: "local-*"
+      register: locales
+      run_once: true
+
+    - name: "Escena 3 — sin delegate_facts el hecho es del host ORIGINAL; con el, del DELEGADO (y gana el ultimo)"
+      ansible.builtin.assert:
+        that:
+          - marca_c == 'puesta desde ' ~ inventory_hostname
+          - (inventory_hostname == 'nodo3') == (marca_c2 is defined)
+          - hostvars['nodo3'].marca_c2 == 'puesta desde nodo3'
+        success_msg: >-
+          {{ inventory_hostname }}: marca_c = "{{ marca_c }}" (la tarea corrio en nodo3
+          pero el hecho es mio); marca_c2 {{ 'existe' if marca_c2 is defined else 'NO existe' }}
+          — con delegate_facts el hecho se guardo en nodo3, y como los tres
+          escribieron sobre nodo3 gano el ultimo: "{{ hostvars['nodo3'].marca_c2 }}".
+        fail_msg: >-
+          delegate_facts no se comporto como se midio en {{ inventory_hostname }}:
+          marca_c={{ marca_c | default('AUSENTE') }} marca_c2={{ marca_c2 | default('AUSENTE') }}
+
+    - name: "Escena 4b — delegate_to: localhost corre POR HOST (tres marcas), no una vez"
+      ansible.builtin.assert:
+        that:
+          - locales.files | map(attribute='path') | map('basename') | sort == ['local-nodo1', 'local-nodo2', 'local-nodo3']
+        success_msg: >-
+          Tres marcas en el controlador ({{ locales.files | length }}): una tarea con
+          delegate_to: localhost corre una vez POR CADA host de la play — para una
+          sola ejecucion hace falta run_once.
+        fail_msg: "local_action no se comporto como se midio: {{ locales.files | map(attribute='path') | list }}"
+      run_once: true
+
+    - name: Dejar la marca final para el CI (todas las escenas pasaron)
+      ansible.builtin.copy:
+        dest: /tmp/ansible-lab-41/TODAS-LAS-ESCENAS-OK
+        content: "ok\n"
+        mode: "0644"
+      changed_when: false
+      run_once: true
