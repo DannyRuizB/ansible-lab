@@ -307,6 +307,15 @@ jobs:
           ansible-playbook playbooks/41_delegacion_a_fondo.yml
           test -f /tmp/ansible-lab-41/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
 
+      # estrategias: linear espera al más lento en cada tarea, free deja que
+      # los rápidos acaben antes, throttle serializa una tarea y forks=1 impide
+      # la concurrencia (no el orden). Marcas de tiempo con umbrales holgados (3 s de
+      # sleep frente a 2.5 s) para que un runner lento no invente un fallo.
+      - name: "Playbook 42 — estrategias a fondo (asserts incluidos)"
+        run: |
+          ansible-playbook playbooks/42_estrategias_a_fondo.yml
+          test -f /tmp/ansible-lab-42/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \

@@ -1,0 +1,286 @@
+# =============================================================================
+# Playbook 42 — estrategias a fondo: `strategy: linear` frente a `free`,
+# `throttle` y `forks` (QUIEN espera a quien, y cuanto)
+#
+# Un host lento en una play de cien es un host lento... o cien hosts lentos,
+# segun la estrategia. Todo medido contra ansible-core 2.21 sobre la flota
+# falsa de alias de localhost, con marcas de tiempo escritas por cada host y
+# un `nodo1` que duerme 3 segundos en la primera tarea:
+#
+#   - Escena 1 (linear, la estrategia por defecto): la play avanza TAREA A
+#     TAREA y cada tarea espera a que TODOS los hosts la terminen. Medido:
+#     nodo2 y nodo3 no escribieron su marca de la tarea 2 hasta pasados los
+#     3 s del sleep de nodo1 — un host lento frena a toda la flota en cada
+#     tarea.
+#
+#   - Escena 2 (free): cada host avanza por SUS tareas sin esperar a los
+#     demas. Medido: nodo2 y nodo3 terminaron las tres tareas ~3 s ANTES que
+#     nodo1 (sus marcas de la tarea 3 llegaron antes que la marca de la
+#     tarea 2 de nodo1). El precio: el orden de la salida se mezcla y las
+#     tareas que dependen de "todos han llegado aqui" (un register de otro
+#     host, un run_once que otros esperan) dejan de tener sentido.
+#
+#   - Escena 3 (throttle): `throttle: N` limita cuantos hosts ejecutan ESA
+#     tarea a la vez, sea cual sea la estrategia. Medido: una tarea de 1 s
+#     con `throttle: 1` sobre tres hosts tarda >= 3 s de principio a fin; la
+#     misma tarea sin throttle, ~1 s mas la sobrecarga de las marcas (que se
+#     escriben con throttle: 1 y en el runner del CI valen ~0.2 s por host —
+#     la primera version comparaba contra un techo fijo de 2.5 s y el runner
+#     lo rompio; ahora se asserta la DIFERENCIA entre ambas, >= 1.5 s).
+#
+#   - Escena 4 (forks): `forks` es el techo GLOBAL de procesos que ansible
+#     lanza a la vez (por defecto 5) y limita CONCURRENCIA, no orden. Medido
+#     con una orden anidada con ANSIBLE_FORKS=1 y strategy free: tres hosts
+#     que duermen 1 s cada uno tardan >= 3 s en total (ninguno duerme a la
+#     vez que otro), y el orden de las tareas se entremezcla igual que con
+#     free (un host hizo su tarea 3 antes de que otro hiciera la 2) — la
+#     primera version de esta escena esperaba un round-robin ordenado y la
+#     medicion dijo que no: free sigue siendo free, solo que de uno en uno.
+#
+# Marcas: cada host escribe "<escena> <tarea> <host> <epoch>" con
+# `throttle: 1` (varios hosts escribiendo a la vez en el mismo fichero
+# pierden lineas — lo midio el playbook 40).
+#
+# Ejecutar:
+#   ansible-playbook playbooks/42_estrategias_a_fondo.yml
+# ...el CI lo ejecuta esperando rc 0 y comprobando la marca final.
+# =============================================================================
+
+- name: "Estrategias 0 — la flota falsa (nodo1 es el lento) y el escenario limpio"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Empezar con el directorio de marcas vacio
+      ansible.builtin.file:
+        path: /tmp/ansible-lab-42
+        state: "{{ item }}"
+        mode: "0755"
+      loop: [absent, directory]
+      changed_when: false
+
+    - name: Añadir tres alias de localhost al grupo flota42
+      ansible.builtin.add_host:
+        name: "nodo{{ item }}"
+        groups: flota42
+        lento: "{{ item == 1 }}"
+        ansible_connection: local
+        ansible_python_interpreter: "{{ ansible_playbook_python }}"
+      loop: [1, 2, 3]
+      changed_when: false
+
+- name: "Estrategias 1 — linear: cada tarea espera al mas lento"
+  hosts: flota42
+  gather_facts: false
+  strategy: linear
+  tasks:
+    - name: Marca de salida (todos a la vez)
+      ansible.builtin.shell: 'echo "linear t0 {{ inventory_hostname }} $(date +%s.%N)" >> /tmp/ansible-lab-42/marcas.txt'
+      throttle: 1
+      changed_when: false
+    - name: Nodo1 duerme 3 s; los demas no duermen
+      ansible.builtin.command: "sleep {{ '3' if lento | bool else '0' }}"
+      changed_when: false
+    - name: Marca de la tarea 2
+      ansible.builtin.shell: 'echo "linear t2 {{ inventory_hostname }} $(date +%s.%N)" >> /tmp/ansible-lab-42/marcas.txt'
+      throttle: 1
+      changed_when: false
+
+- name: "Estrategias 2 — free: cada host va a lo suyo"
+  hosts: flota42
+  gather_facts: false
+  strategy: free
+  tasks:
+    - name: Marca de salida
+      ansible.builtin.shell: 'echo "free t0 {{ inventory_hostname }} $(date +%s.%N)" >> /tmp/ansible-lab-42/marcas.txt'
+      throttle: 1
+      changed_when: false
+    - name: Nodo1 duerme 3 s; los demas no duermen
+      ansible.builtin.command: "sleep {{ '3' if lento | bool else '0' }}"
+      changed_when: false
+    - name: Marca de la tarea 2
+      ansible.builtin.shell: 'echo "free t2 {{ inventory_hostname }} $(date +%s.%N)" >> /tmp/ansible-lab-42/marcas.txt'
+      throttle: 1
+      changed_when: false
+    - name: Marca de la tarea 3
+      ansible.builtin.shell: 'echo "free t3 {{ inventory_hostname }} $(date +%s.%N)" >> /tmp/ansible-lab-42/marcas.txt'
+      throttle: 1
+      changed_when: false
+
+- name: "Estrategias 3 — throttle: la misma tarea de 1 s, con y sin techo"
+  hosts: flota42
+  gather_facts: false
+  tasks:
+    - name: Marca antes del sleep sin throttle
+      ansible.builtin.shell: 'echo "thr0 t0 {{ inventory_hostname }} $(date +%s.%N)" >> /tmp/ansible-lab-42/marcas.txt'
+      throttle: 1
+      changed_when: false
+    - name: Un segundo, los tres a la vez
+      ansible.builtin.command: sleep 1
+      changed_when: false
+    - name: Marca despues (sin throttle)
+      ansible.builtin.shell: 'echo "thr0 t1 {{ inventory_hostname }} $(date +%s.%N)" >> /tmp/ansible-lab-42/marcas.txt'
+      throttle: 1
+      changed_when: false
+    - name: Marca antes del sleep CON throttle 1
+      ansible.builtin.shell: 'echo "thr1 t0 {{ inventory_hostname }} $(date +%s.%N)" >> /tmp/ansible-lab-42/marcas.txt'
+      throttle: 1
+      changed_when: false
+    - name: Un segundo, de uno en uno
+      ansible.builtin.command: sleep 1
+      throttle: 1
+      changed_when: false
+    - name: Marca despues (con throttle)
+      ansible.builtin.shell: 'echo "thr1 t1 {{ inventory_hostname }} $(date +%s.%N)" >> /tmp/ansible-lab-42/marcas.txt'
+      throttle: 1
+      changed_when: false
+
+- name: "Estrategias 4 — forks: free con un solo proceso, medido desde fuera"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    entorno_42:
+      ANSIBLE_VAULT_PASSWORD_FILE: /tmp/ansible-lab-42/vault_pass
+      ANSIBLE_FORKS: "1"
+  tasks:
+    - name: Dejar un fichero de vault (sin uso) para el ansible anidado
+      ansible.builtin.copy:
+        content: "sin-uso\n"
+        dest: "{{ entorno_42.ANSIBLE_VAULT_PASSWORD_FILE }}"
+        mode: "0600"
+      changed_when: false
+
+    - name: Escribir el playbook interior (free, tres hosts que duermen 1 s cada uno)
+      changed_when: false
+      ansible.builtin.copy:
+        dest: /tmp/ansible-lab-42/forks1.yml
+        mode: "0644"
+        content: |
+          - name: flota
+            hosts: localhost
+            gather_facts: false
+            tasks:
+              - name: Tres alias
+                ansible.builtin.add_host:
+                  name: "nodo{{ '{{' }} item {{ '}}' }}"
+                  groups: flota42i
+                  ansible_connection: local
+                  ansible_python_interpreter: "{{ '{{' }} ansible_playbook_python {{ '}}' }}"
+                loop: [1, 2, 3]
+                changed_when: false
+          - name: free con forks 1
+            hosts: flota42i
+            gather_facts: false
+            strategy: free
+            tasks:
+              - name: Marca de salida
+                ansible.builtin.shell: 'echo "forks1 t0 {{ '{{' }} inventory_hostname {{ '}}' }} $(date +%s.%N)" >> /tmp/ansible-lab-42/forks1.txt'
+                changed_when: false
+              - name: Un segundo por host
+                ansible.builtin.command: sleep 1
+                changed_when: false
+              - name: Marca de llegada
+                ansible.builtin.shell: 'echo "forks1 t1 {{ '{{' }} inventory_hostname {{ '}}' }} $(date +%s.%N)" >> /tmp/ansible-lab-42/forks1.txt'
+                changed_when: false
+
+    - name: Correr el interior con ANSIBLE_FORKS=1
+      ansible.builtin.command:
+        cmd: ansible-playbook /tmp/ansible-lab-42/forks1.yml
+      register: forks1_run
+      changed_when: false
+      failed_when: false
+      environment: "{{ entorno_42 }}"
+
+    - name: Leer las marcas de tiempo
+      ansible.builtin.slurp:
+        src: /tmp/ansible-lab-42/marcas.txt
+      register: marcas_raw
+
+    - name: Leer las marcas del interior
+      ansible.builtin.slurp:
+        src: /tmp/ansible-lab-42/forks1.txt
+      register: forks1_raw
+
+    - name: Convertir las marcas del interior en un diccionario "tarea host" → epoch
+      ansible.builtin.set_fact:
+        marca_f: >-
+          {{ marca_f | default({}) | combine({ (item.split(' ')[1] ~ ' ' ~ item.split(' ')[2]): (item.split(' ')[3] | float) }) }}
+      loop: "{{ (forks1_raw.content | b64decode).splitlines() }}"
+      loop_control:
+        label: "{{ item.split(' ')[0:3] | join(' ') }}"
+
+    - name: Convertir las marcas en un diccionario "escena tarea host" → epoch
+      ansible.builtin.set_fact:
+        marca: >-
+          {{ marca | default({}) | combine({ (item.split(' ')[0] ~ ' ' ~ item.split(' ')[1] ~ ' ' ~ item.split(' ')[2]): (item.split(' ')[3] | float) }) }}
+      loop: "{{ (marcas_raw.content | b64decode).splitlines() }}"
+      loop_control:
+        label: "{{ item.split(' ')[0:3] | join(' ') }}"
+
+    - name: "Escena 1 — linear: nodo2 y nodo3 esperaron los 3 s de nodo1 antes de la tarea 2"
+      ansible.builtin.assert:
+        that:
+          - (marca['linear t2 nodo2'] - marca['linear t0 nodo2']) >= 2.5
+          - (marca['linear t2 nodo3'] - marca['linear t0 nodo3']) >= 2.5
+        success_msg: >-
+          linear: nodo2 tardo {{ '%.1f' | format(marca['linear t2 nodo2'] - marca['linear t0 nodo2']) }} s
+          en llegar a la tarea 2 y nodo3 {{ '%.1f' | format(marca['linear t2 nodo3'] - marca['linear t0 nodo3']) }} s,
+          sin dormir ninguno: esperaron al sleep de nodo1. Un host lento frena a toda la play en cada tarea.
+        fail_msg: "linear no se comporto como se midio: {{ marca }}"
+
+    - name: "Escena 2 — free: nodo2 y nodo3 acabaron sus tres tareas antes de que nodo1 saliera del sleep"
+      ansible.builtin.assert:
+        that:
+          - (marca['free t3 nodo2'] - marca['free t0 nodo2']) < 2.5
+          - (marca['free t3 nodo3'] - marca['free t0 nodo3']) < 2.5
+          - marca['free t3 nodo2'] < marca['free t2 nodo1']
+          - marca['free t3 nodo3'] < marca['free t2 nodo1']
+          - (marca['free t2 nodo1'] - marca['free t0 nodo1']) >= 2.5
+        success_msg: >-
+          free: nodo2 acabo la tarea 3 a los {{ '%.1f' | format(marca['free t3 nodo2'] - marca['free t0 nodo2']) }} s
+          y nodo3 a los {{ '%.1f' | format(marca['free t3 nodo3'] - marca['free t0 nodo3']) }} s, mientras nodo1
+          seguia dormido (su tarea 2 llego a los {{ '%.1f' | format(marca['free t2 nodo1'] - marca['free t0 nodo1']) }} s).
+          Nadie espero a nadie.
+        fail_msg: "free no se comporto como se midio: {{ marca }}"
+
+    - name: "Escena 3 — throttle 1 serializa: 1 s por host = >= 3 s en total; sin throttle, ~1 s"
+      vars:
+        thr1_span: >-
+          {{ ([marca['thr1 t1 nodo1'], marca['thr1 t1 nodo2'], marca['thr1 t1 nodo3']] | max)
+             - ([marca['thr1 t0 nodo1'], marca['thr1 t0 nodo2'], marca['thr1 t0 nodo3']] | min) }}
+        thr0_span: >-
+          {{ ([marca['thr0 t1 nodo1'], marca['thr0 t1 nodo2'], marca['thr0 t1 nodo3']] | max)
+             - ([marca['thr0 t0 nodo1'], marca['thr0 t0 nodo2'], marca['thr0 t0 nodo3']] | min) }}
+      ansible.builtin.assert:
+        that:
+          - thr1_span | float >= 2.8
+          - (thr1_span | float) - (thr0_span | float) >= 1.5
+        success_msg: >-
+          throttle: la tarea de 1 s tardo {{ '%.1f' | format(thr1_span | float) }} s con throttle: 1
+          (de uno en uno) frente a {{ '%.1f' | format(thr0_span | float) }} s sin el (los tres a la vez):
+          {{ '%.1f' | format((thr1_span | float) - (thr0_span | float)) }} s de diferencia, los dos sleeps
+          que la version en paralelo se ahorra. (Las marcas se escriben con throttle: 1 y anaden
+          ~0.2 s por host en un runner lento — por eso se compara la DIFERENCIA, no un techo fijo.)
+        fail_msg: "throttle no se comporto como se midio: {{ marca }}"
+
+    - name: "Escena 4 — forks 1: tres sleeps de 1 s tardan >= 3 s (nadie corre a la vez que otro), aunque la estrategia sea free"
+      vars:
+        forks_span: >-
+          {{ ([marca_f['t1 nodo1'], marca_f['t1 nodo2'], marca_f['t1 nodo3']] | max)
+             - ([marca_f['t0 nodo1'], marca_f['t0 nodo2'], marca_f['t0 nodo3']] | min) }}
+      ansible.builtin.assert:
+        that:
+          - forks1_run.rc == 0
+          - forks_span | float >= 2.8
+        success_msg: >-
+          Con ANSIBLE_FORKS=1 y strategy free, tres hosts que duermen 1 s tardaron
+          {{ '%.1f' | format(forks_span | float) }} s de principio a fin: un solo proceso, nadie
+          duerme a la vez que otro. forks limita la concurrencia, no el orden (free sigue
+          entremezclando las tareas).
+        fail_msg: "forks 1 no se comporto como se midio: {{ marca_f | default({}) }} rc={{ forks1_run.rc }}"
+
+    - name: Dejar la marca final para el CI (todas las escenas pasaron)
+      ansible.builtin.copy:
+        dest: /tmp/ansible-lab-42/TODAS-LAS-ESCENAS-OK
+        content: "ok\n"
+        mode: "0644"
+      changed_when: false
