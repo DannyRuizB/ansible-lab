@@ -23,7 +23,10 @@
 #   - Escena 3 (throttle): `throttle: N` limita cuantos hosts ejecutan ESA
 #     tarea a la vez, sea cual sea la estrategia. Medido: una tarea de 1 s
 #     con `throttle: 1` sobre tres hosts tarda >= 3 s de principio a fin; la
-#     misma tarea sin throttle, ~1 s (los tres a la vez).
+#     misma tarea sin throttle, ~1 s mas la sobrecarga de las marcas (que se
+#     escriben con throttle: 1 y en el runner del CI valen ~0.2 s por host —
+#     la primera version comparaba contra un techo fijo de 2.5 s y el runner
+#     lo rompio; ahora se asserta la DIFERENCIA entre ambas, >= 1.5 s).
 #
 #   - Escena 4 (forks): `forks` es el techo GLOBAL de procesos que ansible
 #     lanza a la vez (por defecto 5) y limita CONCURRENCIA, no orden. Medido
@@ -250,10 +253,13 @@
       ansible.builtin.assert:
         that:
           - thr1_span | float >= 2.8
-          - thr0_span | float < 2.5
+          - (thr1_span | float) - (thr0_span | float) >= 1.5
         success_msg: >-
           throttle: la tarea de 1 s tardo {{ '%.1f' | format(thr1_span | float) }} s con throttle: 1
-          (de uno en uno) frente a {{ '%.1f' | format(thr0_span | float) }} s sin el (los tres a la vez).
+          (de uno en uno) frente a {{ '%.1f' | format(thr0_span | float) }} s sin el (los tres a la vez):
+          {{ '%.1f' | format((thr1_span | float) - (thr0_span | float)) }} s de diferencia, los dos sleeps
+          que la version en paralelo se ahorra. (Las marcas se escriben con throttle: 1 y anaden
+          ~0.2 s por host en un runner lento — por eso se compara la DIFERENCIA, no un techo fijo.)
         fail_msg: "throttle no se comporto como se midio: {{ marca }}"
 
     - name: "Escena 4 — forks 1: tres sleeps de 1 s tardan >= 3 s (nadie corre a la vez que otro), aunque la estrategia sea free"
