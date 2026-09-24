@@ -1,0 +1,6 @@
+---
+- name: Anotar la entrada alternativa
+  ansible.builtin.set_fact:
+    contrato_lab_visto:
+      nombre: "{{ contrato_lab_nombre }}"
+      entrada: alt

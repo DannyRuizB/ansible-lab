@@ -1,0 +1,307 @@
+# =============================================================================
+# Playbook 44 — argument_specs a fondo: el contrato de un rol, y lo que NO hace
+#
+# Un rol puede declarar en `meta/argument_specs.yml` qué variables acepta:
+# tipo, obligatoriedad, choices, elementos de una lista. Ansible inserta solo
+# una tarea "Validating arguments against arg spec 'main'" ANTES de la primera
+# tarea del rol y la hace fallar si el contrato no se cumple. Parece un tipado
+# de verdad; no lo es del todo. Todo medido contra ansible-core 2.21 con el
+# rol roles/contrato_lab (su único trabajo es dejar en el fact
+# `contrato_lab_visto` lo que le llegó de verdad):
+#
+#   - Escena 1 (el contrato corta a tiempo): falta un `required` -> la
+#     validación falla con "missing required arguments: contrato_lab_puerto"
+#     y la primera tarea del rol NO llega a correr. Los fallos se capturan
+#     con block/rescue (el playbook 43), que deja los mensajes en
+#     `ansible_failed_result.argument_errors`.
+#
+#   - Escena 2 (choices y tipos): un modo fuera de `choices` -> "must be one
+#     of: dev, prod"; un puerto "ochenta" -> "unable to convert to int".
+#
+#   - Escena 3 (LA GORDA — valida, pero NO convierte): un puerto "8080" pasa
+#     la validación (es convertible a int)... y dentro del rol sigue siendo un
+#     STRING. `etiquetas: "a,b"` pasa como lista (la separa por comas para
+#     validar)... y llega como string. `[a, 3]` con elements: str pasa y el 3
+#     llega como int. La validación mira si PODRÍA convertir; el rol recibe
+#     lo que le pasaste. Quien necesite un int, que ponga `| int`.
+#
+#   - Escena 4 (el default del spec es documentación): `default: dev` en el
+#     contrato NO define la variable — dentro del rol `contrato_lab_modo` no
+#     existe. El valor por defecto de verdad sigue viviendo en
+#     defaults/main.yml. Y una variable que el contrato no conoce no se
+#     señala: no hay modo estricto.
+#
+#   - Escena 5 (cada entrada, su contrato): `tasks_from: alt` valida contra
+#     la entrada `alt` del spec (otro required distinto); un tasks_from SIN
+#     entrada en el spec corre sin validar nada.
+#
+#   - Escena 6 (el contrato es la documentación): `ansible-doc -t role`
+#     imprime el contrato como la ayuda del rol. Y es MÁS estricto que la
+#     ejecución: un spec sin `description` valida perfectamente en ejecución,
+#     pero ansible-doc lo rechaza ("must have a 'description' field").
+#
+# Ejecutar:
+#   ansible-playbook playbooks/44_argument_specs_a_fondo.yml
+# ...el CI lo ejecuta esperando rc 0 y comprobando la marca final.
+# =============================================================================
+
+- name: "Contrato 0 — escenario limpio"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Empezar con el directorio de marcas vacío
+      ansible.builtin.file:
+        path: /tmp/ansible-lab-44
+        state: "{{ item }}"
+        mode: "0755"
+      loop: [absent, directory]
+      changed_when: false
+
+- name: "Contrato 1 y 2 — el contrato corta antes de la primera tarea del rol"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: "Escena 1 — sin el puerto obligatorio"
+      block:
+        - name: Borrar el testigo
+          ansible.builtin.set_fact:
+            contrato_lab_visto: ninguno
+        - name: Llamar al rol sin contrato_lab_puerto
+          ansible.builtin.include_role:
+            name: contrato_lab
+      rescue:
+        - name: Guardar el error de la validación
+          ansible.builtin.set_fact:
+            error_s1: "{{ ansible_failed_result.argument_errors | join(' | ') }}"
+            testigo_s1: "{{ contrato_lab_visto }}"
+
+    - name: "Escena 2a — un modo fuera de choices"
+      block:
+        - name: Llamar al rol con contrato_lab_modo=staging
+          ansible.builtin.include_role:
+            name: contrato_lab
+          vars:
+            contrato_lab_puerto: 80
+            contrato_lab_modo: staging
+      rescue:
+        - name: Guardar el error de choices
+          ansible.builtin.set_fact:
+            error_s2a: "{{ ansible_failed_result.argument_errors | join(' | ') }}"
+
+    - name: "Escena 2b — un puerto que no es un número"
+      block:
+        - name: Llamar al rol con contrato_lab_puerto=ochenta
+          ansible.builtin.include_role:
+            name: contrato_lab
+          vars:
+            contrato_lab_puerto: ochenta
+      rescue:
+        - name: Guardar el error de tipo
+          ansible.builtin.set_fact:
+            error_s2b: "{{ ansible_failed_result.argument_errors | join(' | ') }}"
+
+    - name: "Escena 1 y 2 — veredicto"
+      ansible.builtin.assert:
+        that:
+          - error_s1 is search('missing required arguments. contrato_lab_puerto')
+          - testigo_s1 == 'ninguno'
+          - error_s2a is search('must be one of. dev, prod, got. staging')
+          - error_s2b is search('unable to convert to int')
+        success_msg: >-
+          El contrato corta ANTES de la primera tarea del rol (el testigo sigue en
+          '{{ testigo_s1 }}'): falta de required, choice inválida y tipo no convertible,
+          cada uno con su mensaje en ansible_failed_result.argument_errors.
+        fail_msg: "la validación no se comportó como se midió (escenas 1-2)"
+
+- name: "Contrato 3 — valida, pero NO convierte"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Un puerto string convertible y etiquetas como string con comas
+      ansible.builtin.include_role:
+        name: contrato_lab
+      vars:
+        contrato_lab_puerto: "8080"
+        contrato_lab_etiquetas: "a,b"
+
+    - name: Guardar lo que vio el rol
+      ansible.builtin.set_fact:
+        visto_s3a: "{{ contrato_lab_visto }}"
+
+    - name: Una lista de str con un entero dentro
+      ansible.builtin.include_role:
+        name: contrato_lab
+      vars:
+        contrato_lab_puerto: 80
+        contrato_lab_etiquetas: [a, 3]
+
+    - name: "Escena 3 — veredicto"
+      vars:
+        visto_s3b: "{{ contrato_lab_visto }}"
+      ansible.builtin.assert:
+        that:
+          - visto_s3a.puerto_tipo == 'str'
+          - visto_s3a.etiquetas_tipo == 'str'
+          - visto_s3b.puerto_tipo == 'int'
+          - visto_s3b.etiquetas_tipo == 'list'
+        success_msg: >-
+          "8080" pasó el contrato type=int y dentro del rol es {{ visto_s3a.puerto_tipo }};
+          "a,b" pasó como lista y llegó como {{ visto_s3a.etiquetas_tipo }}. La validación
+          comprueba si PODRÍA convertir, pero el rol recibe lo que le pasaste: el `| int`
+          sigue siendo cosa tuya.
+        fail_msg: "la conversión no se comportó como se midió (escena 3): {{ visto_s3a }}"
+
+- name: "Contrato 4 — el default del spec es documentación, y no hay modo estricto"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Llamar al rol sin modo y con una variable que el contrato no conoce
+      ansible.builtin.include_role:
+        name: contrato_lab
+      vars:
+        contrato_lab_puerto: 443
+        contrato_lab_desconocida: sobra
+
+    - name: "Escena 4 — veredicto"
+      ansible.builtin.assert:
+        that:
+          - contrato_lab_visto.modo_definido == false
+          - contrato_lab_visto.puerto == 443
+        success_msg: >-
+          `default: dev` en el contrato NO definió contrato_lab_modo dentro del rol
+          (modo_definido={{ contrato_lab_visto.modo_definido }}): el default de verdad vive en
+          defaults/main.yml. Y contrato_lab_desconocida pasó sin una queja.
+        fail_msg: "el default o el modo estricto no se comportaron como se midió (escena 4)"
+
+- name: "Contrato 5 — cada punto de entrada, su contrato"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: "Entrada alt sin su required"
+      block:
+        - name: Llamar a la entrada alt sin contrato_lab_nombre
+          ansible.builtin.include_role:
+            name: contrato_lab
+            tasks_from: alt
+          vars:
+            contrato_lab_puerto: 80
+      rescue:
+        - name: Guardar el error de la entrada alt
+          ansible.builtin.set_fact:
+            error_s5: "{{ ansible_failed_result.argument_errors | join(' | ') }}"
+            contexto_s5: "{{ ansible_failed_result.validate_args_context.argument_spec_name }}"
+
+    - name: Un tasks_from sin entrada en el spec
+      ansible.builtin.include_role:
+        name: contrato_lab
+        tasks_from: sin_contrato
+
+    - name: "Escena 5 — veredicto"
+      ansible.builtin.assert:
+        that:
+          - error_s5 is search('missing required arguments. contrato_lab_nombre')
+          - contexto_s5 == 'alt'
+          - contrato_lab_visto.entrada == 'sin_contrato'
+        success_msg: >-
+          tasks_from alt se validó contra la entrada '{{ contexto_s5 }}' (el puerto de main
+          no le basta); sin_contrato no tiene entrada y corrió sin validar nada.
+        fail_msg: "los puntos de entrada no se comportaron como se midió (escena 5)"
+
+- name: "Contrato 6 — el contrato es la documentación (y ansible-doc es más estricto)"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Pedir la ayuda del rol a ansible-doc
+      ansible.builtin.command:
+        cmd: ansible-doc -t role -r {{ playbook_dir }}/../roles contrato_lab
+      register: doc_bueno
+      environment:
+        # ansible-doc pinta en negrita AUNQUE no haya tty (medido): sin esto
+        # 'ENTRY POINT: alt' llega como 'ENTRY POINT: \e[1malt' y el search falla
+        ANSIBLE_NOCOLOR: "1"
+      changed_when: false
+
+    - name: Crear los directorios del rol sin_desc
+      ansible.builtin.file:
+        path: "/tmp/ansible-lab-44/roles/sin_desc/{{ item }}"
+        state: directory
+        mode: "0755"
+      loop: [meta, tasks]
+
+    - name: Montar un rol cuyo spec no lleva description
+      ansible.builtin.copy:
+        dest: "/tmp/ansible-lab-44/roles/sin_desc/{{ item.path }}"
+        content: "{{ item.content }}"
+        mode: "0644"
+      loop:
+        - path: meta/argument_specs.yml
+          content: |
+            argument_specs:
+              main:
+                short_description: sin descripciones
+                options:
+                  sin_desc_x:
+                    type: int
+                    required: true
+        - path: tasks/main.yml
+          # !unsafe: sin él, copy plantillaría el {{ sin_desc_x }} AHORA
+          content: !unsafe |
+            - name: Anotar que corrió
+              ansible.builtin.set_fact:
+                sin_desc_corrio: "{{ sin_desc_x }}"
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: Escribir un playbook interior que usa el rol sin descripciones
+      ansible.builtin.copy:
+        dest: /tmp/ansible-lab-44/inner.yml
+        mode: "0644"
+        content: |
+          - hosts: localhost
+            gather_facts: false
+            tasks:
+              - ansible.builtin.include_role: { name: sin_desc }
+                vars: { sin_desc_x: 7 }
+              - ansible.builtin.debug: { msg: "sin_desc_corrio={{ '{{' }} sin_desc_corrio {{ '}}' }}" }
+
+    # Orden anidada con su propio ANSIBLE_ROLES_PATH: el rol vive en /tmp y un
+    # include_role por RUTA es justo lo que ansible-lint prohíbe (role-name[path]).
+    - name: El mismo spec sin description valida bien en ejecución (orden anidada)
+      ansible.builtin.command:
+        cmd: ansible-playbook /tmp/ansible-lab-44/inner.yml
+      register: inner_run
+      changed_when: false
+      environment:
+        ANSIBLE_ROLES_PATH: /tmp/ansible-lab-44/roles
+        ANSIBLE_NOCOLOR: "1"
+
+    - name: Pedir la ayuda del rol sin descripciones
+      ansible.builtin.command:
+        cmd: ansible-doc -t role -r /tmp/ansible-lab-44/roles sin_desc
+      register: doc_malo
+      environment:
+        ANSIBLE_NOCOLOR: "1"
+      changed_when: false
+      failed_when: false
+
+    - name: "Escena 6 — veredicto"
+      ansible.builtin.assert:
+        that:
+          - doc_bueno.stdout is search('Puerto del servicio simulado')
+          - doc_bueno.stdout is search('ENTRY POINT. \W*alt')
+          - inner_run.stdout is search('sin_desc_corrio=7')
+          - doc_malo.rc != 0
+          - (doc_malo.stdout ~ doc_malo.stderr) is search("must have a 'description' field")
+        success_msg: >-
+          ansible-doc imprimió el contrato de contrato_lab como su ayuda (con la entrada alt);
+          el spec sin description corrió bien en ejecución (rc {{ inner_run.rc }})
+          pero ansible-doc lo rechazó (rc {{ doc_malo.rc }}): el contrato documenta, y la
+          documentación exige más que la validación.
+        fail_msg: "ansible-doc no se comportó como se midió (escena 6): rc={{ doc_malo.rc }}"
+
+    - name: Dejar la marca final para el CI (todas las escenas pasaron)
+      ansible.builtin.copy:
+        dest: /tmp/ansible-lab-44/TODAS-LAS-ESCENAS-OK
+        content: "ok\n"
+        mode: "0644"
+      changed_when: false

@@ -324,6 +324,14 @@ jobs:
           ansible-playbook playbooks/43_rescue_a_fondo.yml
           test -f /tmp/ansible-lab-43/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
 
+      # argument_specs: el contrato corta antes de la primera tarea del rol,
+      # pero valida SIN convertir ("8080" llega como str), su default no define
+      # nada, cada tasks_from tiene su entrada y ansible-doc exige description.
+      - name: "Playbook 44 — argument_specs a fondo (asserts incluidos)"
+        run: |
+          ansible-playbook playbooks/44_argument_specs_a_fondo.yml
+          test -f /tmp/ansible-lab-44/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \

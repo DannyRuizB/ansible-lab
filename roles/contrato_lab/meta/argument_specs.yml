@@ -1,0 +1,35 @@
+---
+# El CONTRATO del rol (playbook 44). Ansible lo lee solo: antes de la primera
+# tarea del punto de entrada inserta una tarea "Validating arguments against
+# arg spec '<entrada>'" que falla si no se cumple. Lo que valida y lo que NO
+# hace está medido en el playbook 44 — en corto: comprueba, pero no convierte
+# ni rellena. Las `description` no son decorativas: `ansible-doc -t role`
+# las exige (la validación en ejecución no).
+argument_specs:
+  main:
+    short_description: Punto de entrada principal del rol de contrato
+    description:
+      - Recibe un puerto, un modo y una lista de etiquetas, y deja en un fact lo que llegó de verdad.
+    options:
+      contrato_lab_puerto:
+        description: Puerto del servicio simulado.
+        type: int
+        required: true
+      contrato_lab_modo:
+        description: Modo de despliegue. El default de aquí es DOCUMENTACIÓN, no un valor (escena 4).
+        type: str
+        choices: [dev, prod]
+        default: dev
+      contrato_lab_etiquetas:
+        description: Etiquetas libres.
+        type: list
+        elements: str
+  alt:
+    short_description: Punto de entrada alternativo (tasks_from alt)
+    description:
+      - Otro contrato para otro fichero de tareas del mismo rol.
+    options:
+      contrato_lab_nombre:
+        description: Nombre obligatorio solo en esta entrada.
+        type: str
+        required: true
