@@ -1,0 +1,6 @@
+---
+# Este fichero NO tiene entrada en argument_specs.yml: se ejecuta sin validar.
+- name: Anotar la entrada sin contrato
+  ansible.builtin.set_fact:
+    contrato_lab_visto:
+      entrada: sin_contrato

@@ -21,12 +21,13 @@
 #     host, un run_once que otros esperan) dejan de tener sentido.
 #
 #   - Escena 3 (throttle): `throttle: N` limita cuantos hosts ejecutan ESA
-#     tarea a la vez, sea cual sea la estrategia. Medido: una tarea de 1 s
-#     con `throttle: 1` sobre tres hosts tarda >= 3 s de principio a fin; la
-#     misma tarea sin throttle, ~1 s mas la sobrecarga de las marcas (que se
-#     escriben con throttle: 1 y en el runner del CI valen ~0.2 s por host —
-#     la primera version comparaba contra un techo fijo de 2.5 s y el runner
-#     lo rompio; ahora se asserta la DIFERENCIA entre ambas, >= 1.5 s).
+#     tarea a la vez, sea cual sea la estrategia. Cada host anota el inicio
+#     y el fin de su sleep de 1 s DENTRO del comando; con `throttle: 1`
+#     ningun intervalo se solapa con otro, sin throttle si. Las dos primeras
+#     versiones median la duracion de la tarea desde fuera (un techo fijo de
+#     2.5 s y luego una diferencia >= 1.5 s entre ambas) y el runner del CI
+#     rompio las dos: arrancar los workers llego a costar 2.6 s en la tarea
+#     "en paralelo" (medido el 24/09/2026). El solape no depende de eso.
 #
 #   - Escena 4 (forks): `forks` es el techo GLOBAL de procesos que ansible
 #     lanza a la vez (por defecto 5) y limita CONCURRENCIA, no orden. Medido
@@ -110,27 +111,15 @@
   hosts: flota42
   gather_facts: false
   tasks:
-    - name: Marca antes del sleep sin throttle
-      ansible.builtin.shell: 'echo "thr0 t0 {{ inventory_hostname }} $(date +%s.%N)" >> /tmp/ansible-lab-42/marcas.txt'
-      throttle: 1
-      changed_when: false
+    # Cada host anota el inicio y el fin de SU sleep, medidos DENTRO del
+    # comando y en su propio fichero (sin throttle escriben a la vez). Lo que
+    # se asserta es el solape de esos intervalos, no la duracion de la tarea:
+    # el arranque de los workers ya no cuenta (ver la cabecera).
     - name: Un segundo, los tres a la vez
-      ansible.builtin.command: sleep 1
-      changed_when: false
-    - name: Marca despues (sin throttle)
-      ansible.builtin.shell: 'echo "thr0 t1 {{ inventory_hostname }} $(date +%s.%N)" >> /tmp/ansible-lab-42/marcas.txt'
-      throttle: 1
-      changed_when: false
-    - name: Marca antes del sleep CON throttle 1
-      ansible.builtin.shell: 'echo "thr1 t0 {{ inventory_hostname }} $(date +%s.%N)" >> /tmp/ansible-lab-42/marcas.txt'
-      throttle: 1
+      ansible.builtin.shell: 'a=$(date +%s.%N); sleep 1; echo "$a $(date +%s.%N)" > /tmp/ansible-lab-42/thr0-{{ inventory_hostname }}.txt'
       changed_when: false
     - name: Un segundo, de uno en uno
-      ansible.builtin.command: sleep 1
-      throttle: 1
-      changed_when: false
-    - name: Marca despues (con throttle)
-      ansible.builtin.shell: 'echo "thr1 t1 {{ inventory_hostname }} $(date +%s.%N)" >> /tmp/ansible-lab-42/marcas.txt'
+      ansible.builtin.shell: 'a=$(date +%s.%N); sleep 1; echo "$a $(date +%s.%N)" > /tmp/ansible-lab-42/thr1-{{ inventory_hostname }}.txt'
       throttle: 1
       changed_when: false
 
@@ -242,25 +231,30 @@
           Nadie espero a nadie.
         fail_msg: "free no se comporto como se midio: {{ marca }}"
 
-    - name: "Escena 3 — throttle 1 serializa: 1 s por host = >= 3 s en total; sin throttle, ~1 s"
+    # Intervalos [inicio, fin] ordenados por inicio: hay solape si y solo si
+    # algun sleep empieza antes de que acabe el anterior (hueco < 0).
+    - name: Huecos entre sleeps consecutivos, con y sin throttle
       vars:
-        thr1_span: >-
-          {{ ([marca['thr1 t1 nodo1'], marca['thr1 t1 nodo2'], marca['thr1 t1 nodo3']] | max)
-             - ([marca['thr1 t0 nodo1'], marca['thr1 t0 nodo2'], marca['thr1 t0 nodo3']] | min) }}
-        thr0_span: >-
-          {{ ([marca['thr0 t1 nodo1'], marca['thr0 t1 nodo2'], marca['thr0 t1 nodo3']] | max)
-             - ([marca['thr0 t0 nodo1'], marca['thr0 t0 nodo2'], marca['thr0 t0 nodo3']] | min) }}
+        thr_dir: /tmp/ansible-lab-42
+      ansible.builtin.set_fact:
+        huecos_thr0: >-
+          {% set p = query('ansible.builtin.file', thr_dir ~ '/thr0-nodo1.txt', thr_dir ~ '/thr0-nodo2.txt', thr_dir ~ '/thr0-nodo3.txt')
+             | map('split') | map('map', 'float') | map('list') | sort %}{{ [p[1][0] - p[0][1], p[2][0] - p[1][1]] }}
+        huecos_thr1: >-
+          {% set p = query('ansible.builtin.file', thr_dir ~ '/thr1-nodo1.txt', thr_dir ~ '/thr1-nodo2.txt', thr_dir ~ '/thr1-nodo3.txt')
+             | map('split') | map('map', 'float') | map('list') | sort %}{{ [p[1][0] - p[0][1], p[2][0] - p[1][1]] }}
+
+    - name: "Escena 3 — throttle 1 serializa: ningun sleep se solapa; sin throttle, si"
       ansible.builtin.assert:
         that:
-          - thr1_span | float >= 2.8
-          - (thr1_span | float) - (thr0_span | float) >= 1.5
+          - huecos_thr0 | min < 0
+          - huecos_thr1 | min >= 0
         success_msg: >-
-          throttle: la tarea de 1 s tardo {{ '%.1f' | format(thr1_span | float) }} s con throttle: 1
-          (de uno en uno) frente a {{ '%.1f' | format(thr0_span | float) }} s sin el (los tres a la vez):
-          {{ '%.1f' | format((thr1_span | float) - (thr0_span | float)) }} s de diferencia, los dos sleeps
-          que la version en paralelo se ahorra. (Las marcas se escriben con throttle: 1 y anaden
-          ~0.2 s por host en un runner lento — por eso se compara la DIFERENCIA, no un techo fijo.)
-        fail_msg: "throttle no se comporto como se midio: {{ marca }}"
+          throttle: con throttle: 1 cada sleep empezo despues de que acabara el anterior (huecos
+          {{ huecos_thr1 | map('round', 2) | list }} s, ninguno negativo); sin el, los sleeps se
+          solaparon (huecos {{ huecos_thr0 | map('round', 2) | list }} s: el negativo es el solape).
+          Se mide dentro del comando, asi que un runner lento arrancando workers no inventa nada.
+        fail_msg: "throttle no se comporto como se midio: sin throttle {{ huecos_thr0 }}, con throttle {{ huecos_thr1 }}"
 
     - name: "Escena 4 — forks 1: tres sleeps de 1 s tardan >= 3 s (nadie corre a la vez que otro), aunque la estrategia sea free"
       vars:

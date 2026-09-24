@@ -1,0 +1,11 @@
+---
+# El testigo: deja en un fact lo que llegó AL ROL, después de la validación.
+# Si la validación corta, esta tarea no corre y el fact se queda como estaba.
+- name: Anotar lo que llegó de verdad al rol
+  ansible.builtin.set_fact:
+    contrato_lab_visto:
+      puerto: "{{ contrato_lab_puerto }}"
+      puerto_tipo: "{{ contrato_lab_puerto | type_debug }}"
+      modo_definido: "{{ contrato_lab_modo is defined }}"
+      etiquetas_tipo: "{{ (contrato_lab_etiquetas | type_debug) if contrato_lab_etiquetas is defined else 'ausente' }}"
+      entrada: main
