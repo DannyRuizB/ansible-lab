@@ -1,0 +1,280 @@
+# =============================================================================
+# Playbook 45 — import_role frente a include_role: estático contra dinámico,
+# versión roles (el playbook 12 lo hizo con ficheros de tareas)
+#
+# Traer un rol desde `tasks:` tiene dos formas y NO son intercambiables: una se
+# resuelve AL PARSEAR (import_role) y la otra AL LLEGAR la ejecución allí
+# (include_role). De esa diferencia salen seis comportamientos, todos medidos
+# contra ansible-core 2.21 con el rol roles/visible_lab (su único trabajo es
+# añadir una línea a un fichero de marcas cada vez que corre, notificar a su
+# handler y traer un default y una var):
+#
+#   - Escena 1 (import expone el rol A TODA la play): tras un import_role,
+#     `visible_lab_default` y `visible_lab_var` son visibles en las tareas que
+#     vienen después... y TAMBIÉN en las que vienen ANTES. El import se
+#     resolvió al parsear, así que sus variables existen desde el principio.
+#
+#   - Escena 2 (include es privado, salvo public: true): tras un include_role
+#     las variables del rol NO se ven fuera; con `public: true`, sí.
+#
+#   - Escena 3 (handlers): notificar al handler de un rol que se va a
+#     INCLUIR más abajo falla ("The requested handler ... was not found"):
+#     todavía no existe. Con import_role el handler existe desde el parseo y
+#     el notify funciona.
+#
+#   - Escena 4 (tags, LA TRAMPA): con `--tags web`, un import_role etiquetado
+#     `web` ejecuta el rol (el tag baja a cada tarea). Un include_role
+#     etiquetado `web` CORRE... y sus tareas se saltan en silencio: el tag se
+#     queda en la inclusión. Hace falta `apply: {tags: [web]}` para bajarlo.
+#
+#   - Escena 5 (loop): include_role admite loop — el rol corre una vez por
+#     item y su handler, notificado dos veces, UNA (el dedupe del playbook 16).
+#     import_role con loop no llega ni a ejecutarse: "You cannot use loops on
+#     'import_role' statements" (rc 4).
+#
+#   - Escena 6 (--list-tasks): enseña las tareas del rol importado; las del
+#     incluido no existen al parsear y no aparecen.
+#
+# Regla de andar por casa: import_role por defecto (previsible, visible para
+# tags y --list-tasks); include_role cuando haga falta decidir en ejecución
+# (un when de una vez, un loop, un nombre de rol que viene de una variable) —
+# y entonces acordarse de `apply` para los tags y de `public` para las vars.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/45_import_vs_include_role.yml
+# ...el CI lo ejecuta esperando rc 0 y comprobando la marca final.
+# =============================================================================
+
+- name: "Roles 0 — escenario limpio"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Empezar con el directorio de marcas vacío
+      ansible.builtin.file:
+        path: /tmp/ansible-lab-45
+        state: "{{ item }}"
+        mode: "0755"
+      loop: [absent, directory]
+      changed_when: false
+
+- name: "Roles 1 — import_role expone sus variables a toda la play, también ANTES"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Mirar las variables del rol ANTES de importarlo
+      ansible.builtin.set_fact:
+        antes_s1: "{{ visible_lab_default | default('INVISIBLE') }}/{{ visible_lab_var | default('INVISIBLE') }}"
+
+    - name: Importar el rol
+      ansible.builtin.import_role:
+        name: visible_lab
+      vars:
+        visible_lab_quien: s1
+
+    - name: "Escena 1 — veredicto"
+      ansible.builtin.assert:
+        that:
+          - antes_s1 == 'DEF/VAR'
+          - (visible_lab_default | default('INVISIBLE')) == 'DEF'
+          - (visible_lab_var | default('INVISIBLE')) == 'VAR'
+        success_msg: >-
+          import_role: la tarea de ANTES ya veía {{ antes_s1 }} y la de después también —
+          el import se resolvió al parsear, así que sus variables existen en toda la play.
+        fail_msg: "import_role no expuso las variables como se midió (escena 1): antes={{ antes_s1 }}"
+
+- name: "Roles 2a — include_role es privado"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Incluir el rol
+      ansible.builtin.include_role:
+        name: visible_lab
+      vars:
+        visible_lab_quien: s2a
+
+    - name: Mirar las variables del rol después del include
+      ansible.builtin.set_fact:
+        despues_s2a: "{{ visible_lab_default | default('INVISIBLE') }}/{{ visible_lab_var | default('INVISIBLE') }}"
+
+- name: "Roles 2b — include_role con public: true"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Incluir el rol con public
+      ansible.builtin.include_role:
+        name: visible_lab
+        public: true
+      vars:
+        visible_lab_quien: s2b
+
+    - name: "Escena 2 — veredicto"
+      ansible.builtin.assert:
+        that:
+          - despues_s2a == 'INVISIBLE/INVISIBLE'
+          - (visible_lab_default | default('INVISIBLE')) == 'DEF'
+          - (visible_lab_var | default('INVISIBLE')) == 'VAR'
+        success_msg: >-
+          include_role: tras el include las variables del rol no se ven fuera ({{ despues_s2a }});
+          con public: true, sí (DEF/VAR).
+        fail_msg: "include_role no se comportó como se midió (escena 2): sin public={{ despues_s2a }}"
+
+- name: "Roles 3a — notify al handler de un rol que se IMPORTA más abajo"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Notificar antes del import
+      ansible.builtin.shell:
+        cmd: echo "notify s3a" >> /tmp/ansible-lab-45/marcas.txt
+      changed_when: true
+      notify: Aviso de visible_lab
+
+    - name: Importar el rol después del notify
+      ansible.builtin.import_role:
+        name: visible_lab
+      vars:
+        visible_lab_quien: s3a
+
+- name: "Roles 3b..6 — lo que solo se ve desde fuera (órdenes anidadas)"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    # Las órdenes anidadas heredan el ansible.cfg del lab (que pide un vault)
+    # y necesitan encontrar el rol: el idiom de los playbooks 43/44.
+    entorno_45:
+      ANSIBLE_VAULT_PASSWORD_FILE: /tmp/ansible-lab-45/vault_pass
+      ANSIBLE_ROLES_PATH: "{{ playbook_dir }}/../roles"
+      ANSIBLE_NOCOLOR: "1"
+    interiores:
+      s3b: |
+        - hosts: localhost
+          gather_facts: false
+          tasks:
+            - name: Notificar antes del include
+              ansible.builtin.debug: { msg: notify }
+              changed_when: true
+              notify: Aviso de visible_lab
+            - ansible.builtin.include_role: { name: visible_lab }
+      s4: |
+        - hosts: localhost
+          gather_facts: false
+          tasks:
+            - ansible.builtin.import_role: { name: visible_lab }
+              vars: { visible_lab_quien: s4-import }
+              tags: [web]
+            - ansible.builtin.include_role: { name: visible_lab }
+              vars: { visible_lab_quien: s4-include }
+              tags: [web]
+            - ansible.builtin.include_role:
+                name: visible_lab
+                apply: { tags: [web] }
+              vars: { visible_lab_quien: s4-apply }
+              tags: [web]
+      s5ok: |
+        - hosts: localhost
+          gather_facts: false
+          tasks:
+            - ansible.builtin.include_role: { name: visible_lab }
+              vars: { visible_lab_quien: s5 }
+              loop: [1, 2]
+      s5ko: |
+        - hosts: localhost
+          gather_facts: false
+          tasks:
+            - ansible.builtin.import_role: { name: visible_lab }
+              loop: [1, 2]
+      s6: |
+        - hosts: localhost
+          gather_facts: false
+          tasks:
+            - ansible.builtin.import_role: { name: visible_lab }
+            - ansible.builtin.include_role: { name: visible_lab }
+  tasks:
+    - name: Dejar un fichero de vault (sin uso) para el ansible anidado
+      ansible.builtin.copy:
+        content: "sin-uso\n"
+        dest: "{{ entorno_45.ANSIBLE_VAULT_PASSWORD_FILE }}"
+        mode: "0600"
+      changed_when: false
+
+    - name: Escribir los playbooks interiores
+      ansible.builtin.copy:
+        dest: "/tmp/ansible-lab-45/{{ item.key }}.yml"
+        content: "{{ item.value }}"
+        mode: "0644"
+      loop: "{{ interiores | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      changed_when: false
+
+    - name: Correr cada interior (s4 con --tags web, s6 con --list-tasks)
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook /tmp/ansible-lab-45/{{ item }}.yml
+          {{ '--tags web' if item == 's4' else '' }}
+          {{ '--list-tasks' if item == 's6' else '' }}
+      loop: [s3b, s4, s5ok, s5ko, s6]
+      register: interior
+      changed_when: false
+      failed_when: false
+      environment: "{{ entorno_45 }}"
+
+    - name: Guardar los resultados por escena y leer las marcas
+      ansible.builtin.set_fact:
+        run_45: "{{ dict(interior.results | map(attribute='item') | zip(interior.results)) }}"
+        marcas_45: "{{ lookup('ansible.builtin.file', '/tmp/ansible-lab-45/marcas.txt').splitlines() }}"
+
+    - name: "Escena 3 — veredicto (handlers)"
+      ansible.builtin.assert:
+        that:
+          - "'notify s3a' in marcas_45"
+          - "'handler s3a' in marcas_45"
+          - run_45.s3b.rc != 0
+          - (run_45.s3b.stdout ~ run_45.s3b.stderr) is search("handler 'Aviso de visible_lab' was not found")
+        success_msg: >-
+          Handlers: notificar al rol que se IMPORTA más abajo funcionó (el handler corrió);
+          notificar al que se INCLUYE más abajo falló (rc {{ run_45.s3b.rc }}, "was not found") —
+          el handler de un include no existe hasta que la ejecución llega al include.
+        fail_msg: "los handlers no se comportaron como se midió (escena 3): rc={{ run_45.s3b.rc }}"
+
+    - name: "Escena 4 — veredicto (tags, la trampa)"
+      ansible.builtin.assert:
+        that:
+          - run_45.s4.rc == 0
+          - "'tarea s4-import' in marcas_45"
+          - "'tarea s4-include' not in marcas_45"
+          - "'tarea s4-apply' in marcas_45"
+        success_msg: >-
+          Con --tags web: el import_role etiquetado corrió su rol; el include_role etiquetado
+          CORRIÓ y sus tareas se saltaron en silencio (rc 0, sin marca); con apply: {tags: [web]} sí.
+        fail_msg: "los tags no se comportaron como se midió (escena 4): {{ marcas_45 | select('search', 's4') | list }}"
+
+    - name: "Escena 5 — veredicto (loop)"
+      ansible.builtin.assert:
+        that:
+          - run_45.s5ok.rc == 0
+          - marcas_45 | select('equalto', 'tarea s5') | list | length == 2
+          - marcas_45 | select('equalto', 'handler s5') | list | length == 1
+          - run_45.s5ko.rc == 4
+          - (run_45.s5ko.stdout ~ run_45.s5ko.stderr) is search("You cannot use loops on 'import_role' statements")
+        success_msg: >-
+          loop: include_role corrió el rol dos veces y su handler, notificado dos veces, una;
+          import_role con loop ni se ejecutó (rc {{ run_45.s5ko.rc }}, "You cannot use loops on 'import_role'").
+        fail_msg: "el loop no se comportó como se midió (escena 5): rc={{ run_45.s5ko.rc }}"
+
+    - name: "Escena 6 — veredicto (--list-tasks)"
+      vars:
+        listadas: "{{ run_45.s6.stdout_lines | select('search', 'visible_lab : Registrar') | list | length }}"
+      ansible.builtin.assert:
+        that:
+          - run_45.s6.rc == 0
+          - listadas | int == 1
+        success_msg: >-
+          --list-tasks enseñó {{ listadas }} tarea del rol: la del import. Las del include no existen al parsear.
+        fail_msg: "--list-tasks no se comportó como se midió (escena 6): {{ run_45.s6.stdout_lines }}"
+
+    - name: Dejar la marca final para el CI (todas las escenas pasaron)
+      ansible.builtin.copy:
+        dest: /tmp/ansible-lab-45/TODAS-LAS-ESCENAS-OK
+        content: "ok\n"
+        mode: "0644"
+      changed_when: false

@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  author: DannyRuizB
+  description: Rol de laboratorio del playbook 45 — deja marcas de cuándo corre y expone un default y una var
+  license: MIT
+  min_ansible_version: "2.11"
+  platforms:
+    - name: Debian
+      versions:
+        - all
+dependencies: []

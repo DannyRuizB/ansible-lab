@@ -333,6 +333,15 @@ jobs:
           ansible-playbook playbooks/44_argument_specs_a_fondo.yml
           test -f /tmp/ansible-lab-44/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
 
+      # import_role frente a include_role: el import expone las vars del rol a
+      # toda la play (también antes), el include es privado salvo public; el
+      # handler de un include no existe hasta llegar a él; con --tags el
+      # include corre y sus tareas se saltan sin apply; loop solo en include.
+      - name: "Playbook 45 — import_role frente a include_role (asserts incluidos)"
+        run: |
+          ansible-playbook playbooks/45_import_vs_include_role.yml
+          test -f /tmp/ansible-lab-45/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \

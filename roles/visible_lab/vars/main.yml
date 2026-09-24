@@ -1,0 +1,3 @@
+---
+# vars/ (prioridad alta) — misma pregunta de visibilidad que el default.
+visible_lab_var: VAR

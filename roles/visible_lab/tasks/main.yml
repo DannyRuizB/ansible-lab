@@ -1,0 +1,9 @@
+---
+# El testigo del playbook 45: cada ejecución REAL del rol añade una línea
+# (append de verdad, la lección del rol dep_sello: un medidor idempotente no
+# cuenta invocaciones) y notifica al handler.
+- name: Registrar una ejecución real del rol
+  ansible.builtin.shell:
+    cmd: echo "tarea {{ visible_lab_quien }}" >> /tmp/ansible-lab-45/marcas.txt
+  changed_when: true
+  notify: Aviso de visible_lab
