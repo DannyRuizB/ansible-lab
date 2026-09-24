@@ -252,6 +252,15 @@
       loop_control:
         label: "{{ item.path }}"
 
+    # El ansible.cfg del lab pide un fichero de vault; en el runner no existe
+    # (en local sí, y por eso aquí pasaba) — el idiom del playbook 43.
+    - name: Dejar un fichero de vault (sin uso) para el ansible anidado
+      ansible.builtin.copy:
+        content: "sin-uso\n"
+        dest: /tmp/ansible-lab-44/vault_pass
+        mode: "0600"
+      changed_when: false
+
     - name: Escribir un playbook interior que usa el rol sin descripciones
       ansible.builtin.copy:
         dest: /tmp/ansible-lab-44/inner.yml
@@ -273,6 +282,7 @@
       changed_when: false
       environment:
         ANSIBLE_ROLES_PATH: /tmp/ansible-lab-44/roles
+        ANSIBLE_VAULT_PASSWORD_FILE: /tmp/ansible-lab-44/vault_pass
         ANSIBLE_NOCOLOR: "1"
 
     - name: Pedir la ayuda del rol sin descripciones
