@@ -1,0 +1,5 @@
+---
+# Visible (o no) fuera del rol según cómo se traiga: la escena 1-2 del playbook 45.
+visible_lab_default: DEF
+# Quién llama: se escribe en cada marca para separar escenas.
+visible_lab_quien: sin-nombre

@@ -1,0 +1,5 @@
+---
+- name: Aviso de visible_lab
+  ansible.builtin.shell:
+    cmd: echo "handler {{ visible_lab_quien }}" >> /tmp/ansible-lab-45/marcas.txt
+  changed_when: false
