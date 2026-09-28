@@ -1,0 +1,252 @@
+# =============================================================================
+# Playbook 46 — module_defaults y environment a fondo: los dos "valores por
+# defecto" de una play, y por qué NO se heredan igual
+#
+# Los dos se escriben en la play (o en un bloque, o en la tarea) y los dos
+# evitan repetir lo mismo en cada tarea. Pero uno da ARGUMENTOS a un módulo y
+# el otro da VARIABLES DE ENTORNO al proceso remoto, y al anidarlos se portan
+# al revés. Todo medido contra ansible-core 2.21:
+#
+#   - Escena 1 (lo básico): `module_defaults: {file: {mode: "0640"}}` llega a
+#     la tarea `ansible.builtin.file` (la clave corta y la FQCN son la misma),
+#     el argumento escrito en la tarea GANA al default, y un default con
+#     plantilla ("{{ modo }}") se evalúa en la tarea, con sus variables.
+#
+#   - Escena 2 (cada módulo es su propia clave): un default de `copy` NO llega
+#     a `template`, aunque template copie el fichero por debajo. Dos módulos
+#     que se parecen son dos claves.
+#
+#   - Escena 3 (anidar SUSTITUYE, LA PRIMERA TRAMPA): un bloque que declara
+#     `module_defaults` para `file` REEMPLAZA el dict de file de la play
+#     entero — el `mode: "0640"` de arriba se pierde aunque el bloque solo
+#     quisiera añadir `state`. Los defaults de OTROS módulos sí sobreviven: la
+#     sustitución es módulo a módulo.
+#
+#   - Escena 4 (un typo lo rompe todo, LA SEGUNDA TRAMPA): un parámetro que el
+#     módulo no admite, puesto en module_defaults, no avisa al parsear: cada
+#     tarea de ese módulo falla al ejecutarse con "Unsupported parameters",
+#     aunque la tarea en sí esté perfecta.
+#
+#   - Escena 5 (environment SÍ se fusiona): play A/B, bloque B, tarea C → el
+#     proceso ve A de la play, B del bloque y C de la tarea. Justo lo contrario
+#     que la escena 3: aquí el nivel interior pisa CLAVE a clave.
+#
+#   - Escena 6 (environment es del proceso REMOTO): `lookup('env', ...)` corre
+#     en el controlador y no ve el environment de la tarea (sale vacío). Y el
+#     de la play sí llega a gather_facts: `ansible_env` lo trae.
+#
+# Y un efecto secundario que también se mide: ansible-lint NO lee
+# module_defaults. Las tareas sin `mode` de las escenas 1-3 las marca como
+# risky-file-permissions aunque el default sí se lo dé — de ahí sus `noqa`
+# (la de template, en cambio, es de verdad: ese fichero se queda en el umask).
+#
+# Regla de andar por casa: module_defaults en UN nivel por módulo (si un
+# bloque lo necesita distinto, repetir el dict completo), y nada de typos en
+# él; environment para lo que el proceso remoto tiene que ver, nunca para lo
+# que se templa en el controlador.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/46_module_defaults_y_environment.yml
+# ...el CI lo ejecuta esperando rc 0 y comprobando la marca final.
+# =============================================================================
+
+- name: "Defaults 0 — escenario limpio"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Empezar con el directorio de pruebas vacío
+      ansible.builtin.file:
+        path: /tmp/ansible-lab-46
+        state: "{{ item }}"
+        mode: "0755"
+      loop: [absent, directory]
+      changed_when: false
+
+- name: "Defaults 1..4 — module_defaults"
+  hosts: localhost
+  gather_facts: false
+  module_defaults:
+    file:
+      mode: "0640"
+    ansible.builtin.copy:
+      mode: "0600"
+  vars:
+    modo_46: "0604"
+  tasks:
+    - name: "Escena 1 — la tarea no dice mode: le llega el default"  # noqa: risky-file-permissions
+      ansible.builtin.file:
+        path: /tmp/ansible-lab-46/s1-default
+        state: touch
+        modification_time: preserve
+        access_time: preserve
+
+    - name: "Escena 1 — la tarea dice mode: gana la tarea"
+      ansible.builtin.file:
+        path: /tmp/ansible-lab-46/s1-tarea
+        state: touch
+        mode: "0644"
+        modification_time: preserve
+        access_time: preserve
+
+    - name: "Escena 1 — un default con plantilla se evalúa en la tarea"  # noqa: risky-file-permissions
+      ansible.builtin.file:
+        path: /tmp/ansible-lab-46/s1-plantilla
+        state: touch
+        modification_time: preserve
+        access_time: preserve
+      module_defaults:
+        ansible.builtin.file:
+          mode: "{{ modo_46 }}"
+
+    - name: "Escena 2 — copy recibe su default"  # noqa: risky-file-permissions
+      ansible.builtin.copy:
+        content: "copy\n"
+        dest: /tmp/ansible-lab-46/s2-copy
+
+    - name: "Escena 2 — template NO recibe el default de copy"  # noqa: risky-file-permissions
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/lab46.txt.j2"
+        dest: /tmp/ansible-lab-46/s2-template
+
+    - name: "Escena 3 — un bloque que solo quería añadir state"
+      module_defaults:
+        ansible.builtin.file:
+          state: touch
+      block:
+        - name: "Escena 3 — file dentro del bloque (sin mode ni state en la tarea)"
+          ansible.builtin.file:
+            path: /tmp/ansible-lab-46/s3-file
+            modification_time: preserve
+            access_time: preserve
+
+        - name: "Escena 3 — copy dentro del bloque (su default viene de la play)"  # noqa: risky-file-permissions
+          ansible.builtin.copy:
+            content: "copy\n"
+            dest: /tmp/ansible-lab-46/s3-copy
+
+    - name: "Escena 4 — un typo en module_defaults"
+      module_defaults:
+        ansible.builtin.file:
+          mdoe: "0640"
+      block:
+        - name: "Escena 4 — una tarea file perfectamente escrita"
+          ansible.builtin.file:
+            path: /tmp/ansible-lab-46/s4
+            state: touch
+            mode: "0644"
+            modification_time: preserve
+            access_time: preserve
+      rescue:
+        - name: "Escena 4 — guardar el error"
+          ansible.builtin.set_fact:
+            error_s4: "{{ ansible_failed_result.msg }}"
+
+    - name: Leer los permisos que quedaron
+      ansible.builtin.stat:
+        path: "/tmp/ansible-lab-46/{{ item }}"
+      loop: [s1-default, s1-tarea, s1-plantilla, s2-copy, s2-template, s3-file, s3-copy, s4]
+      register: stat_46
+
+    - name: Indexar los permisos por fichero
+      ansible.builtin.set_fact:
+        modos_46: "{{ dict(stat_46.results | map(attribute='item') | zip(modos_leidos)) }}"
+      vars:
+        modos_leidos: "{{ stat_46.results | map(attribute='stat') | map(attribute='mode', default='NO-EXISTE') | list }}"
+
+    - name: "Escena 1 — veredicto"
+      ansible.builtin.assert:
+        that:
+          - modos_46['s1-default'] == '0640'
+          - modos_46['s1-tarea'] == '0644'
+          - modos_46['s1-plantilla'] == '0604'
+        success_msg: >-
+          El default llegó ({{ modos_46['s1-default'] }}), la tarea le ganó ({{ modos_46['s1-tarea'] }})
+          y el default con plantilla se evaluó en la tarea ({{ modos_46['s1-plantilla'] }}).
+        fail_msg: "module_defaults no se comportó como se midió (escena 1): {{ modos_46 }}"
+
+    - name: "Escena 2 — veredicto"
+      ansible.builtin.assert:
+        that:
+          - modos_46['s2-copy'] == '0600'
+          - modos_46['s2-template'] != '0600'
+        success_msg: >-
+          copy recibió su 0600; template quedó en {{ modos_46['s2-template'] }} (el umask): el default
+          de copy no es de template, aunque se parezcan.
+        fail_msg: "Los defaults cruzaron de módulo (escena 2): {{ modos_46 }}"
+
+    - name: "Escena 3 — veredicto"
+      ansible.builtin.assert:
+        that:
+          - modos_46['s3-file'] != 'NO-EXISTE'
+          - modos_46['s3-file'] != '0640'
+          - modos_46['s3-copy'] == '0600'
+        success_msg: >-
+          El state del bloque llegó (el fichero existe), pero el mode 0640 de la play se PERDIÓ
+          ({{ modos_46['s3-file'] }}): el bloque sustituyó el dict de file entero. copy conservó
+          su 0600: la sustitución es módulo a módulo.
+        fail_msg: "La anidación de module_defaults no se comportó como se midió (escena 3): {{ modos_46 }}"
+
+    - name: "Escena 4 — veredicto"
+      ansible.builtin.assert:
+        that:
+          - error_s4 is defined
+          - "'Unsupported parameters' in error_s4"
+          - "'mdoe' in error_s4"
+          - modos_46['s4'] == 'NO-EXISTE'
+        success_msg: >-
+          La tarea estaba bien y falló igual: el typo del default ('mdoe') viaja con cada tarea
+          del módulo ("Unsupported parameters"), y el fichero no se creó.
+        fail_msg: "El typo en module_defaults no rompió la tarea como se midió (escena 4)"
+
+- name: "Defaults 5..6 — environment"
+  hosts: localhost
+  gather_facts: true
+  gather_subset: [min]
+  environment:
+    LAB46_A: play
+    LAB46_B: play
+  tasks:
+    - name: "Escena 5 — play, bloque y tarea ponen cada uno lo suyo"
+      environment:
+        LAB46_B: bloque
+      block:
+        - name: "Escena 5 — lo que ve el proceso remoto"
+          ansible.builtin.command:
+            cmd: sh -c 'echo "A=$LAB46_A B=$LAB46_B C=$LAB46_C"'
+          environment:
+            LAB46_C: tarea
+          register: entorno_s5
+          changed_when: false
+
+    - name: "Escena 5 — veredicto"
+      ansible.builtin.assert:
+        that:
+          - entorno_s5.stdout == 'A=play B=bloque C=tarea'
+        success_msg: >-
+          El proceso vio "{{ entorno_s5.stdout }}": environment se fusiona clave a clave,
+          justo al revés que module_defaults.
+        fail_msg: "environment no se fusionó como se midió (escena 5): {{ entorno_s5.stdout }}"
+
+    - name: "Escena 6 — lookup('env') con un environment en la tarea"
+      ansible.builtin.set_fact:
+        lookup_s6: "{{ lookup('ansible.builtin.env', 'LAB46_C') | default('VACIO', true) }}"
+      environment:
+        LAB46_C: tarea
+
+    - name: "Escena 6 — veredicto"
+      ansible.builtin.assert:
+        that:
+          - lookup_s6 == 'VACIO'
+          - ansible_env.LAB46_A | default('NO') == 'play'
+        success_msg: >-
+          lookup('env') devolvió {{ lookup_s6 }}: se ejecuta en el controlador y no ve el
+          environment de la tarea. En cambio gather_facts corrió con el de la play:
+          ansible_env.LAB46_A={{ ansible_env.LAB46_A }}.
+        fail_msg: "environment no se comportó como se midió (escena 6): lookup={{ lookup_s6 }}"
+
+    - name: Dejar la marca final para el CI (todas las escenas pasaron)
+      ansible.builtin.copy:
+        dest: /tmp/ansible-lab-46/TODAS-LAS-ESCENAS-OK
+        content: "ok\n"
+        mode: "0644"
+      changed_when: false

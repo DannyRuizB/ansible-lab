@@ -342,6 +342,15 @@ jobs:
           ansible-playbook playbooks/45_import_vs_include_role.yml
           test -f /tmp/ansible-lab-45/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
 
+      # module_defaults frente a environment: el default llega y la tarea gana,
+      # cada módulo es su clave, anidar SUSTITUYE el dict del módulo, un typo
+      # rompe todas sus tareas; environment se fusiona clave a clave y no llega
+      # a lookup('env') (corre en el controlador).
+      - name: "Playbook 46 — module_defaults y environment a fondo (asserts incluidos)"
+        run: |
+          ansible-playbook playbooks/46_module_defaults_y_environment.yml
+          test -f /tmp/ansible-lab-46/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \
