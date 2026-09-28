@@ -7,7 +7,7 @@
 
 Laboratorio de aprendizaje de **Ansible** que funciona **100% en local**, en dos niveles:
 
-- **Playbooks 1-6, 8-12, 15-19, 22, 25-26, 28-30, 32 y 34-45**: el "servidor" gestionado es la propia máquina (`localhost` con `ansible_connection=local`). Sin SSH, sin servidores remotos, sin permisos de administrador — todo ocurre dentro del directorio del proyecto.
+- **Playbooks 1-6, 8-12, 15-19, 22, 25-26, 28-30, 32 y 34-46**: el "servidor" gestionado es la propia máquina (`localhost` con `ansible_connection=local`). Sin SSH, sin servidores remotos, sin permisos de administrador — todo ocurre dentro del directorio del proyecto.
 - **Playbooks 7, 13, 14, 20, 21, 23, 24, 27, 31 y 33 (opcionales)**: una "flota" de 3 contenedores Docker locales gestionados **por SSH real** (y en el 31, por un **connection plugin propio sobre `docker exec`**), para practicar inventarios multi-host, estrategias de ejecución, delegación, inventario dinámico, inventario por capas, lookups, action, connection e inventory plugins a medida, y la precedencia de variables. Requiere Docker, pero sigue siendo local: los contenedores solo escuchan en `127.0.0.1`.
 
 Forma parte de mi formación en automatización/DevOps con perfil de administración de sistemas (ASIR).
@@ -65,6 +65,7 @@ Forma parte de mi formación en automatización/DevOps con perfil de administrac
 | `playbooks/43_rescue_a_fondo.yml` | **block / rescue / always a fondo: el try/catch/finally de Ansible, y qué cuenta como "recuperado"**. Tres escenas con `assert`, medidas contra ansible-core 2.21: **el catch** (una tarea del `block` falla → las restantes del block se saltan, corre `rescue` con `ansible_failed_task.name` y `ansible_failed_result.msg` nombrando qué petó, corre `always`, y tras un rescue exitoso el host queda **recuperado** — la tarea siguiente del play corre, recap `rescued=1 failed=0`); **sin catch** (si el block no falla, `rescue` no se ejecuta y `always` sí — el finally corre pase lo que pase); y **el catch que también peta** (una tarea de `rescue` que falla hunde el host de verdad, las tareas posteriores se saltan, `rc 2`, recap `failed=1 rescued=1`, pero `always` corre igual) — medido en una orden anidada. |
 | `playbooks/44_argument_specs_a_fondo.yml` | **argument_specs a fondo: el contrato de un rol, y lo que NO hace**. Seis escenas con `assert` sobre el rol `roles/contrato_lab`, medidas contra ansible-core 2.21: **el contrato corta a tiempo** (falta un `required`, un valor fuera de `choices` o un tipo no convertible → la tarea automática *Validating arguments against arg spec* falla ANTES de la primera tarea del rol, con los mensajes en `ansible_failed_result.argument_errors`, capturados con block/rescue); **valida, pero NO convierte** (un puerto `"8080"` pasa `type: int` y dentro del rol sigue siendo **str**; `"a,b"` pasa como lista y llega como string — el `\| int` sigue siendo cosa tuya); **el `default:` del spec es documentación** (no define la variable: el default de verdad vive en `defaults/main.yml`) y **no hay modo estricto** (una variable desconocida pasa sin queja); **cada punto de entrada, su contrato** (`tasks_from: alt` valida contra la entrada `alt`; un `tasks_from` sin entrada corre sin validar); y **el contrato es la documentación** (`ansible-doc -t role` lo imprime como ayuda, y es más estricto que la ejecución: sin `description` el rol corre, pero ansible-doc lo rechaza). |
 | `playbooks/45_import_vs_include_role.yml` | **`import_role` frente a `include_role`: estático contra dinámico, versión roles** (el playbook 12 lo hizo con ficheros de tareas). Seis escenas con `assert` sobre el rol `roles/visible_lab`, medidas contra ansible-core 2.21: **el import expone el rol a toda la play** (sus `defaults`/`vars` se ven después… y también ANTES del import: se resolvió al parsear); **el include es privado** salvo `public: true`; **handlers** (notificar al rol que se importa más abajo funciona; al que se incluye más abajo, *"The requested handler … was not found"*); **tags, la trampa** (con `--tags web`, un `include_role` etiquetado corre y sus tareas se saltan en silencio — hace falta `apply: {tags: [web]}`); **loop** (solo en include: el rol corre por item y su handler una vez; `import_role` con loop, rc 4); y **`--list-tasks`** (enseña las tareas del import, no las del include). |
+| `playbooks/46_module_defaults_y_environment.yml` | **`module_defaults` y `environment` a fondo: los dos "valores por defecto" de una play, y por qué NO se heredan igual.** Seis escenas con `assert`, medidas contra ansible-core 2.21: **lo básico** (el default llega a la tarea — la clave corta `file:` y la FQCN son la misma —, el argumento de la tarea gana, y un default con plantilla se evalúa en la tarea); **cada módulo es su clave** (el default de `copy` no llega a `template`); **anidar SUSTITUYE, la primera trampa** (un bloque que declara `module_defaults` para `file` reemplaza el dict entero de la play — se pierde el `mode` aunque solo quisiera añadir `state` —, pero los de otros módulos sobreviven); **un typo lo rompe todo** (un parámetro inexistente en el default hace fallar cada tarea del módulo con *"Unsupported parameters"*, aunque la tarea esté perfecta); **`environment` SÍ se fusiona** clave a clave (play/bloque/tarea); y **`environment` es del proceso remoto** (`lookup('env')` corre en el controlador y no lo ve; `gather_facts` sí trae el de la play en `ansible_env`). Extra medido: **ansible-lint no lee `module_defaults`** y marca `risky-file-permissions` en tareas que sí reciben su `mode`. |
 
 ```
 ansible-lab/
@@ -107,7 +108,7 @@ ansible-lab/
 │   ├── 18_vault_a_fondo.yml
 │   ├── 18_demo_vault_ids.yml            # auxiliar del 18: consumo anidado de vaults
 │   ├── 19_filtros_a_medida.yml
-│   ├── ...                              # 20-39: un playbook por lección (la tabla de arriba los lista todos)
+│   ├── ...                              # del 20 en adelante: un playbook por lección (la tabla de arriba los lista todos)
 │   └── tasks/                           # ficheros de tareas de los playbooks 12, 28 y 38
 ├── filter_plugins/
 │   └── lab_filters.py                   # filtros Jinja a medida en Python (playbook 19)
@@ -142,7 +143,10 @@ ansible-lab/
 │   └── dep_*/                           # cinco roles-testigo: dependencias de meta (playbook 34)
 ├── templates/
 │   ├── informe.md.j2                    # plantilla del informe del sistema
-│   └── app.conf.j2                      # plantilla de configuración de la app simulada
+│   ├── app.conf.j2                      # plantilla de configuración de la app simulada
+│   ├── inventario_filtros.md.j2         # informe del inventario con los filtros propios
+│   ├── servicios_informe.md.j2          # informe de servicios
+│   └── lab46.txt.j2                     # la plantilla de la escena 2 del playbook 46
 ├── informes/                            # (generado) informes y panel de salida
 └── entorno-prueba/                      # (generado) la "aplicación" desplegada
 ```
