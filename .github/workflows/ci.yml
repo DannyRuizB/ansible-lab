@@ -351,6 +351,14 @@ jobs:
           ansible-playbook playbooks/46_module_defaults_y_environment.yml
           test -f /tmp/ansible-lab-46/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
 
+      # no_log tapa la SALIDA de su tarea (resultado, fallo, items y hasta el
+      # label, también el diff y con -vvv), pero no el name, ni lo que guardó
+      # register (un debug después lo imprime), ni el fichero que escribe.
+      - name: "Playbook 47 — no_log a fondo (asserts incluidos)"
+        run: |
+          ansible-playbook playbooks/47_no_log_a_fondo.yml
+          test -f /tmp/ansible-lab-47/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \

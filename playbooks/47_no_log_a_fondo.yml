@@ -1,0 +1,243 @@
+# =============================================================================
+# Playbook 47 — no_log a fondo: qué tapa y, sobre todo, qué NO tapa
+#
+# `no_log: true` es la respuesta de siempre a "esta tarea maneja una clave".
+# Pero no cifra nada ni borra nada: decide qué IMPRIME el callback de ESA
+# tarea. Todo lo demás sigue igual. Seis escenas, medidas contra ansible-core
+# 2.21 antes de escribirlas. Cada una corre un playbook interior, captura su
+# salida y comprueba si el secreto (S3CRETO-47) aparece:
+#
+#   - Escena 1 (lo que sí tapa): el resultado de la tarea sale como
+#     "censored", también cuando FALLA (el mensaje del módulo tampoco se ve;
+#     solo queda el genérico "Task failed").
+#
+#   - Escena 2 (register, LA TRAMPA): la variable registrada guarda el valor
+#     en claro. Un `debug: var: r.stdout` dos tareas más abajo, sin no_log, lo
+#     imprime entero. no_log es de la tarea, no del dato.
+#
+#   - Escena 3 (loops): cada item sale "(item=(censored due to no_log))"...
+#     incluso con un `loop_control.label` propio: la etiqueta también se tapa.
+#
+#   - Escena 4 (el nombre): `name: Usar {{ secreto }}` se imprime en la
+#     cabecera TASK [...] con el valor dentro. no_log no llega al nombre.
+#
+#   - Escena 5 (herencia): no_log en la play baja a todas sus tareas, y una
+#     tarea con `no_log: false` la desactiva para sí misma. Admite plantilla:
+#     `no_log: "{{ ocultar }}"` con -e ocultar=true tapa, sin él no.
+#
+#   - Escena 6 (--diff y -vvv): con no_log, un copy con --diff no enseña el
+#     diff (sin no_log sale la línea +clave=...), y ni -vvv imprime los
+#     argumentos de la tarea tapada.
+#
+# Regla de andar por casa: no_log en la tarea que toca el secreto Y en
+# cualquiera que use lo que esa registró; nunca el secreto en un `name:`; y
+# recordar que no_log es de la SALIDA: el valor sigue en la memoria de la
+# play, en los ficheros que la tarea escriba y en lo que otro callback haga.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/47_no_log_a_fondo.yml
+# ...el CI lo ejecuta esperando rc 0 y comprobando la marca final.
+# =============================================================================
+
+- name: "Escenas de no_log medidas en playbooks interiores"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    dir_47: /tmp/ansible-lab-47
+    # Las órdenes anidadas heredan el ansible.cfg del lab (que pide un vault):
+    # el idiom de los playbooks 43-45.
+    entorno_47:
+      ANSIBLE_VAULT_PASSWORD_FILE: /tmp/ansible-lab-47/vault_pass
+      ANSIBLE_NOCOLOR: "1"
+    cabecera: |
+      - hosts: localhost
+        connection: local
+        gather_facts: false
+        vars:
+          secreto: S3CRETO-47
+    interiores:
+      s1: |
+        tasks:
+          - name: Leer la clave
+            ansible.builtin.command: echo {{ '{{' }} secreto {{ '}}' }}
+            no_log: true
+            changed_when: false
+          - name: Fallar con la clave en la orden
+            ansible.builtin.command: /bin/false {{ '{{' }} secreto {{ '}}' }}
+            no_log: true
+            ignore_errors: true
+      s2: |
+        tasks:
+          - name: Leer la clave
+            ansible.builtin.command: echo {{ '{{' }} secreto {{ '}}' }}
+            register: r
+            no_log: true
+            changed_when: false
+          - name: Mirar lo registrado
+            ansible.builtin.debug:
+              var: r.stdout
+      s3: |
+        tasks:
+          - name: Recorrer claves
+            ansible.builtin.debug:
+              msg: "{{ '{{' }} item {{ '}}' }}"
+            loop: ["{{ '{{' }} secreto {{ '}}' }}", otra]
+            loop_control:
+              label: "etiqueta-{{ '{{' }} item {{ '}}' }}"
+            no_log: true
+      s4: |
+        tasks:
+          - name: Usar {{ '{{' }} secreto {{ '}}' }}
+            ansible.builtin.command: "true"
+            no_log: true
+            changed_when: false
+      s5: |
+        no_log: true
+        tasks:
+          - name: Heredada
+            ansible.builtin.debug:
+              msg: "heredada {{ '{{' }} secreto {{ '}}' }}"
+          - name: Desactivada
+            ansible.builtin.debug:
+              msg: "desactivada {{ '{{' }} secreto {{ '}}' }}"
+            no_log: false
+          - name: Plantilla
+            ansible.builtin.debug:
+              msg: "plantilla {{ '{{' }} secreto {{ '}}' }}"
+            no_log: "{{ '{{' }} ocultar | default(false) {{ '}}' }}"
+      s6: |
+        tasks:
+          - name: Escribir con no_log
+            ansible.builtin.copy:
+              content: "clave={{ '{{' }} secreto {{ '}}' }}\n"
+              dest: /tmp/ansible-lab-47/tapado.conf
+              mode: "0600"
+            no_log: true
+          - name: Escribir sin no_log
+            ansible.builtin.copy:
+              content: "visible=si\n"
+              dest: /tmp/ansible-lab-47/visible.conf
+              mode: "0600"
+    # Cada ejecución: interior + opciones de la línea de órdenes.
+    ejecuciones:
+      - { id: s1, opts: "" }
+      - { id: s2, opts: "" }
+      - { id: s3, opts: "" }
+      - { id: s4, opts: "" }
+      - { id: s5, opts: "" }
+      - { id: s5oculto, interior: s5, opts: "-e ocultar=true" }
+      - { id: s6, opts: "--diff" }
+      - { id: s6vvv, interior: s1, opts: "-vvv" }
+  tasks:
+    - name: Empezar con el directorio limpio
+      ansible.builtin.file:
+        path: "{{ dir_47 }}"
+        state: "{{ item }}"
+        mode: "0755"
+      loop: [absent, directory]
+      changed_when: false
+
+    - name: Dejar un fichero de vault (sin uso) para el ansible anidado
+      ansible.builtin.copy:
+        content: "sin-uso\n"
+        dest: "{{ entorno_47.ANSIBLE_VAULT_PASSWORD_FILE }}"
+        mode: "0600"
+      changed_when: false
+
+    - name: Escribir los playbooks interiores
+      ansible.builtin.copy:
+        dest: "{{ dir_47 }}/{{ item.key }}.yml"
+        content: "{{ cabecera }}{{ item.value | indent(2, first=true) }}"
+        mode: "0644"
+      loop: "{{ interiores | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      changed_when: false
+
+    - name: Correr cada interior y capturar lo que imprime
+      ansible.builtin.command:
+        cmd: "ansible-playbook {{ dir_47 }}/{{ item.interior | default(item.id) }}.yml {{ item.opts }}"
+      loop: "{{ ejecuciones }}"
+      loop_control:
+        label: "{{ item.id }} {{ item.opts }}"
+      register: interior
+      changed_when: false
+      environment: "{{ entorno_47 }}"
+
+    - name: Guardar la salida por escena
+      ansible.builtin.set_fact:
+        out_47: "{{ dict(interior.results | map(attribute='item.id') | zip(interior.results | map(attribute='stdout'))) }}"
+
+    - name: "Escena 1 — veredicto (resultado y fallo tapados)"
+      ansible.builtin.assert:
+        that:
+          - "'S3CRETO-47' not in out_47.s1"
+          - out_47.s1 is search("hidden due to the fact that 'no_log. true'")
+          - out_47.s1 is search('FAILED!')
+        success_msg: >-
+          La salida de la escena 1 no contiene la clave: el resultado y el fallo salen
+          "censored". Solo queda el genérico "Task failed".
+        fail_msg: "no_log no tapó lo que se midió (escena 1):\n{{ out_47.s1 }}"
+
+    - name: "Escena 2 — veredicto (register guarda la clave en claro)"
+      ansible.builtin.assert:
+        that:
+          - out_47.s2 is search('"r.stdout". "S3CRETO-47"')
+        success_msg: >-
+          El debug de la tarea siguiente imprimió "r.stdout": "S3CRETO-47". La tarea que
+          leyó la clave estaba tapada; el dato que registró, no.
+        fail_msg: "register no se comportó como se midió (escena 2):\n{{ out_47.s2 }}"
+
+    - name: "Escena 3 — veredicto (items y etiqueta tapados)"
+      ansible.builtin.assert:
+        that:
+          - "'S3CRETO-47' not in out_47.s3"
+          - "'etiqueta-' not in out_47.s3"
+          - out_47.s3 | regex_findall('item=\\(censored due to no_log\\)') | length == 2
+        success_msg: >-
+          Los dos items salieron "(item=(censored due to no_log))": ni el valor ni el
+          label propio de loop_control.
+        fail_msg: "el loop no se tapó como se midió (escena 3):\n{{ out_47.s3 }}"
+
+    - name: "Escena 4 — veredicto (el nombre de la tarea NO se tapa)"
+      ansible.builtin.assert:
+        that:
+          - out_47.s4 is search('TASK \\[Usar S3CRETO-47\\]')
+        success_msg: >-
+          La cabecera dice "TASK [Usar S3CRETO-47]": no_log tapa el resultado, no el
+          nombre. Nunca un secreto en un name.
+        fail_msg: "el nombre no salió como se midió (escena 4):\n{{ out_47.s4 }}"
+
+    - name: "Escena 5 — veredicto (herencia, override y plantilla)"
+      ansible.builtin.assert:
+        that:
+          - "'heredada S3CRETO-47' not in out_47.s5"
+          - "'desactivada S3CRETO-47' in out_47.s5"
+          - "'plantilla S3CRETO-47' in out_47.s5"
+          - "'plantilla S3CRETO-47' not in out_47.s5oculto"
+          - "'desactivada S3CRETO-47' in out_47.s5oculto"
+        success_msg: >-
+          El no_log de la play tapó la tarea heredada, `no_log: false` destapó la suya y
+          la plantilla obedeció a -e ocultar=true.
+        fail_msg: "la herencia no se comportó como se midió (escena 5):\n{{ out_47.s5 }}"
+
+    - name: "Escena 6 — veredicto (--diff y -vvv)"
+      ansible.builtin.assert:
+        that:
+          - "'S3CRETO-47' not in out_47.s6"
+          - "'+visible=si' in out_47.s6"
+          - "'S3CRETO-47' not in out_47.s6vvv"
+          - out_47.s6vvv is search("hidden due to the fact that 'no_log. true'")
+          - out_47.s6vvv is search('ansible-playbook \\[core')
+          - lookup('ansible.builtin.file', dir_47 ~ '/tapado.conf') == 'clave=S3CRETO-47'
+        success_msg: >-
+          Con --diff solo salió el diff de la tarea sin no_log, y -vvv tampoco imprimió la
+          clave. Pero el fichero tapado.conf la tiene: no_log es de la salida, no del dato.
+        fail_msg: "--diff o -vvv no se comportaron como se midió (escena 6):\n{{ out_47.s6 }}"
+
+    - name: Dejar la marca final para el CI (todas las escenas pasaron)
+      ansible.builtin.copy:
+        dest: "{{ dir_47 }}/TODAS-LAS-ESCENAS-OK"
+        content: "ok\n"
+        mode: "0644"
+      changed_when: false
