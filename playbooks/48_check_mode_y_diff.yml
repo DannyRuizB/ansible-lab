@@ -1,0 +1,265 @@
+# =============================================================================
+# Playbook 48 — check_mode y --diff a fondo: lo que el ensayo NO ensaya
+#
+# `--check` es el "¿qué harías?" de Ansible: cada módulo PREDICE si cambiaría
+# algo y no lo hace. Funciona mientras el módulo sepa predecir. Cinco escenas,
+# medidas contra ansible-core 2.21 antes de escribirlas. Cada una corre un
+# playbook interior (en --check, en una pasada normal o con --diff), captura
+# su salida y su código de salida, y comprueba qué pasó en el disco:
+#
+#   - Escena 1 (lo que sí hace): con --check --diff un copy enseña el diff y
+#     dice "changed", pero el fichero NO se escribe. El handler que notificó
+#     aparece (RUNNING HANDLER) y se salta: tampoco se reinicia nada.
+#
+#   - Escena 2 (LA TRAMPA): command y shell no saben predecir, así que en
+#     --check se SALTAN. Y lo que registran no es "indefinido": es rc 0,
+#     stdout "" y skipped true. Un assert que mira ese stdout pasa en la
+#     pasada normal y FALLA solo en --check — el ensayo rompe donde el
+#     despliegue de verdad no rompe.
+#
+#   - Escena 3 (los dos arreglos): `check_mode: false` en una tarea de solo
+#     lectura hace que corra también en --check (y lo registrado es real);
+#     `creates:` le da al command algo con lo que predecir: dice "changed"
+#     sin ejecutar nada.
+#
+#   - Escena 4 (el arreglo que se pasa de largo): un HANDLER con
+#     `check_mode: false` ("que el reinicio también se vea en el ensayo").
+#     En --check el copy solo PREDICE el cambio... y esa predicción basta
+#     para notificar: el handler corre DE VERDAD. El ensayo reinicia el
+#     servicio por una configuración que nunca escribió.
+#
+#   - Escena 5 (--diff no es solo de --check): sin --check, --diff aplica Y
+#     enseña el contenido nuevo, secretos incluidos (el 47: no_log lo tapa).
+#     `diff: false` en la tarea lo calla aunque se pida --diff; el fichero se
+#     escribe igual.
+#
+# El playbook 9 presenta ansible_check_mode, check_mode: false y true; este
+# mide lo que queda por debajo (y corrige su comentario: lo registrado por un
+# command saltado no queda "sin definir").
+#
+# Regla de andar por casa: toda tarea que solo LEE (command/shell que
+# consulta algo y registra) lleva `check_mode: false`; los command que crean
+# algo, `creates:`/`removes:`; y un `--check` verde solo dice lo que dicen
+# los módulos que saben predecir.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/48_check_mode_y_diff.yml
+# ...el CI lo ejecuta esperando rc 0 y comprobando la marca final.
+# =============================================================================
+
+- name: "Escenas de check_mode y --diff medidas en playbooks interiores"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    dir_48: /tmp/ansible-lab-48
+    # Las órdenes anidadas heredan el ansible.cfg del lab (que pide un vault):
+    # el idiom de los playbooks 43-47.
+    entorno_48:
+      ANSIBLE_VAULT_PASSWORD_FILE: /tmp/ansible-lab-48/vault_pass
+      ANSIBLE_NOCOLOR: "1"
+    cabecera: |
+      - hosts: localhost
+        connection: local
+        gather_facts: false
+        vars:
+          d: /tmp/ansible-lab-48
+    interiores:
+      s1: |
+        tasks:
+          - name: Escribir la configuración
+            ansible.builtin.copy:
+              content: "puerto=8048\n"
+              dest: "{{ '{{' }} d {{ '}}' }}/s1.conf"
+              mode: "0644"
+            notify: Reiniciar el servicio
+        handlers:
+          - name: Reiniciar el servicio
+            ansible.builtin.command: touch {{ '{{' }} d {{ '}}' }}/s1.reiniciado
+            changed_when: true
+      s2: |
+        tasks:
+          - name: Leer la versión
+            ansible.builtin.command: echo VERSION-48
+            register: r
+            changed_when: false
+          - name: Enseñar lo registrado
+            ansible.builtin.debug:
+              msg: "stdout=[{{ '{{' }} r.stdout {{ '}}' }}] rc={{ '{{' }} r.rc {{ '}}' }} skipped={{ '{{' }} r.skipped | default(false) {{ '}}' }}"
+          - name: Comprobar la versión
+            ansible.builtin.assert:
+              that: r.stdout == 'VERSION-48'
+      s3: |
+        tasks:
+          - name: Leer la versión (también en --check)
+            ansible.builtin.command: echo VERSION-48
+            register: r
+            changed_when: false
+            check_mode: false
+          - name: Enseñar lo registrado
+            ansible.builtin.debug:
+              msg: "stdout=[{{ '{{' }} r.stdout {{ '}}' }}]"
+          - name: Comprobar la versión
+            ansible.builtin.assert:
+              that: r.stdout == 'VERSION-48'
+          - name: Crear la marca con creates
+            ansible.builtin.command: touch {{ '{{' }} d {{ '}}' }}/s3.creado
+            args:
+              creates: "{{ '{{' }} d {{ '}}' }}/s3.creado"
+      s4: |
+        tasks:
+          - name: Cambiar la configuración
+            ansible.builtin.copy:
+              content: "puerto=9048\n"
+              dest: "{{ '{{' }} d {{ '}}' }}/s4.conf"
+              mode: "0644"
+            notify: Reiniciar también en el ensayo
+        handlers:
+          - name: Reiniciar también en el ensayo
+            ansible.builtin.command: touch {{ '{{' }} d {{ '}}' }}/s4.reiniciado
+            changed_when: true
+            check_mode: false
+      s5: |
+        tasks:
+          - name: Escribir con diff
+            ansible.builtin.copy:
+              content: "clave=S3CRETO-48\n"
+              dest: "{{ '{{' }} d {{ '}}' }}/s5.con-diff"
+              mode: "0600"
+          - name: Escribir sin diff
+            ansible.builtin.copy:
+              content: "clave=OTRO-48\n"
+              dest: "{{ '{{' }} d {{ '}}' }}/s5.sin-diff"
+              mode: "0600"
+            diff: false
+    # Cada ejecución: interior + opciones de la línea de órdenes.
+    ejecuciones:
+      - { id: s1, opts: "--check --diff" }
+      - { id: s2, opts: "" }
+      - { id: s2check, interior: s2, opts: "--check" }
+      - { id: s3check, interior: s3, opts: "--check" }
+      - { id: s4check, interior: s4, opts: "--check" }
+      - { id: s5, opts: "--diff" }
+  tasks:
+    - name: Empezar con el directorio limpio
+      ansible.builtin.file:
+        path: "{{ dir_48 }}"
+        state: "{{ item }}"
+        mode: "0755"
+      loop: [absent, directory]
+      changed_when: false
+
+    - name: Dejar un fichero de vault (sin uso) para el ansible anidado
+      ansible.builtin.copy:
+        content: "sin-uso\n"
+        dest: "{{ entorno_48.ANSIBLE_VAULT_PASSWORD_FILE }}"
+        mode: "0600"
+      changed_when: false
+
+    - name: Escribir los playbooks interiores
+      ansible.builtin.copy:
+        dest: "{{ dir_48 }}/{{ item.key }}.yml"
+        content: "{{ cabecera }}{{ item.value | indent(2, first=true) }}"
+        mode: "0644"
+      loop: "{{ interiores | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      changed_when: false
+
+    # La escena 2 en --check FALLA a propósito: el rc se guarda y se juzga.
+    - name: Correr cada interior y capturar lo que imprime
+      ansible.builtin.command:
+        cmd: "ansible-playbook {{ dir_48 }}/{{ item.interior | default(item.id) }}.yml {{ item.opts }}"
+      loop: "{{ ejecuciones }}"
+      loop_control:
+        label: "{{ item.id }} {{ item.opts }}"
+      register: interior
+      changed_when: false
+      failed_when: false
+      environment: "{{ entorno_48 }}"
+
+    - name: Guardar la salida y el código por ejecución
+      ansible.builtin.set_fact:
+        out_48: "{{ dict(interior.results | map(attribute='item.id') | zip(interior.results | map(attribute='stdout'))) }}"
+        rc_48: "{{ dict(interior.results | map(attribute='item.id') | zip(interior.results | map(attribute='rc'))) }}"
+
+    - name: Mirar qué quedó en el disco
+      ansible.builtin.stat:
+        path: "{{ dir_48 }}/{{ item }}"
+      loop: [s1.conf, s1.reiniciado, s3.creado, s4.conf, s4.reiniciado, s5.con-diff, s5.sin-diff]
+      register: disco
+
+    - name: Guardar qué existe
+      ansible.builtin.set_fact:
+        existe: "{{ dict(disco.results | map(attribute='item') | zip(disco.results | map(attribute='stat.exists'))) }}"
+
+    - name: "Escena 1 — veredicto (--check predice, enseña el diff y no escribe)"
+      ansible.builtin.assert:
+        that:
+          - rc_48.s1 == 0
+          - "'+puerto=8048' in out_48.s1"
+          - out_48.s1 is search('TASK \\[Escribir la configuración\\][^\\n]*\\n(?:.*\\n)*?changed. \\[localhost\\]')
+          - out_48.s1 is search('RUNNING HANDLER \\[Reiniciar el servicio\\][^\\n]*\\nskipping')
+          - not existe['s1.conf']
+          - not existe['s1.reiniciado']
+        success_msg: >-
+          --check --diff enseñó "+puerto=8048" y dijo changed, pero s1.conf no existe; el
+          handler notificado salió como "skipping" y no reinició nada.
+        fail_msg: "--check no se comportó como se midió (escena 1):\n{{ out_48.s1 }}"
+
+    - name: "Escena 2 — veredicto (el command saltado registra rc 0 y stdout vacío)"
+      ansible.builtin.assert:
+        that:
+          - rc_48.s2 == 0
+          - "'stdout=[VERSION-48] rc=0 skipped=False' in out_48.s2"
+          - rc_48.s2check != 0
+          - "'stdout=[] rc=0 skipped=True' in out_48.s2check"
+          - out_48.s2check is search('TASK \\[Comprobar la versión\\][^\\n]*\\n(?:.*\\n)*?fatal. \\[localhost\\]')
+        success_msg: >-
+          En la pasada normal el assert pasó (stdout=[VERSION-48]); en --check el command
+          se saltó, registró "stdout=[] rc=0 skipped=True" y el mismo assert FALLÓ (rc {{ rc_48.s2check }}).
+        fail_msg: "el command saltado no se comportó como se midió (escena 2):\n{{ out_48.s2check }}"
+
+    - name: "Escena 3 — veredicto (check_mode: false lee de verdad; creates predice)"
+      ansible.builtin.assert:
+        that:
+          - rc_48.s3check == 0
+          - "'stdout=[VERSION-48]' in out_48.s3check"
+          - out_48.s3check is search('TASK \\[Crear la marca con creates\\][^\\n]*\\nchanged. \\[localhost\\]')
+          - not existe['s3.creado']
+        success_msg: >-
+          Con check_mode: false la lectura corrió también en --check y el assert pasó; el
+          command con creates dijo changed y s3.creado no existe.
+        fail_msg: "los arreglos no se comportaron como se midió (escena 3):\n{{ out_48.s3check }}"
+
+    - name: "Escena 4 — veredicto (un handler con check_mode: false reinicia en el ensayo)"
+      ansible.builtin.assert:
+        that:
+          - rc_48.s4check == 0
+          - out_48.s4check is search('RUNNING HANDLER \\[Reiniciar también en el ensayo\\][^\\n]*\\nchanged. \\[localhost\\]')
+          - not existe['s4.conf']
+          - existe['s4.reiniciado']
+        success_msg: >-
+          En --check s4.conf no se escribió, pero el cambio predicho notificó y el handler
+          con check_mode: false corrió de verdad: s4.reiniciado existe.
+        fail_msg: "el handler no se comportó como se midió (escena 4):\n{{ out_48.s4check }}"
+
+    - name: "Escena 5 — veredicto (--diff aplica y enseña; diff: false calla)"
+      ansible.builtin.assert:
+        that:
+          - rc_48.s5 == 0
+          - "'+clave=S3CRETO-48' in out_48.s5"
+          - "'OTRO-48' not in out_48.s5"
+          - out_48.s5 is search('TASK \\[Escribir sin diff\\][^\\n]*\\nchanged. \\[localhost\\]')
+          - existe['s5.con-diff']
+          - existe['s5.sin-diff']
+        success_msg: >-
+          Sin --check, --diff escribió los dos ficheros y enseñó "+clave=S3CRETO-48" en
+          claro; la tarea con diff: false no enseñó nada.
+        fail_msg: "--diff no se comportó como se midió (escena 5):\n{{ out_48.s5 }}"
+
+    - name: Dejar la marca final para el CI (todas las escenas pasaron)
+      ansible.builtin.copy:
+        dest: "{{ dir_48 }}/TODAS-LAS-ESCENAS-OK"
+        content: "ok\n"
+        mode: "0644"
+      changed_when: false

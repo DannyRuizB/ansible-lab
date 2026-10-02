@@ -44,8 +44,10 @@
 
     # Una lectura que el resto del playbook necesita. Los módulos command /
     # shell no saben simularse, así que en --check Ansible los SALTA... y
-    # `config_actual` quedaría sin definir. check_mode: false la fuerza a
-    # ejecutarse también en el ensayo — es seguro porque solo lee.
+    # `config_actual` quedaría con rc 0 y stdout VACÍO (definida, no ausente:
+    # el playbook 48 lo mide), así que el resto decidiría sobre un dato falso.
+    # check_mode: false la fuerza a ejecutarse también en el ensayo — es
+    # seguro porque solo lee.
     - name: Leer qué versión hay desplegada ahora mismo (se ejecuta hasta en el ensayo)
       ansible.builtin.command: cat {{ ensayo_base }}/app.conf
       register: config_actual

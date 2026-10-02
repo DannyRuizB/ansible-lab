@@ -359,6 +359,15 @@ jobs:
           ansible-playbook playbooks/47_no_log_a_fondo.yml
           test -f /tmp/ansible-lab-47/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
 
+      # --check solo ensaya lo que el módulo sabe predecir: command/shell se
+      # saltan y registran rc 0 con stdout VACÍO (un assert falla solo en el
+      # ensayo); un handler con check_mode: false corre de verdad por un cambio
+      # solo predicho; y --diff sin --check aplica y enseña el contenido.
+      - name: "Playbook 48 — check_mode y --diff a fondo (asserts incluidos)"
+        run: |
+          ansible-playbook playbooks/48_check_mode_y_diff.yml
+          test -f /tmp/ansible-lab-48/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \
