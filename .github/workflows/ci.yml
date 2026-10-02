@@ -368,6 +368,15 @@ jobs:
           ansible-playbook playbooks/48_check_mode_y_diff.yml
           test -f /tmp/ansible-lab-48/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
 
+      # Fallos en flota: por defecto el que falla se cae solo; any_errors_fatal
+      # para a todos; max_fail_percentage hay que SUPERARLO y se cuenta POR LOTE
+      # con serial (un fallo de 5 aborta y h5 no corre); rescue e ignore_errors
+      # no cuentan.
+      - name: "Playbook 49 — any_errors_fatal y max_fail_percentage (asserts incluidos)"
+        run: |
+          ansible-playbook playbooks/49_fallos_en_flota.yml
+          test -f /tmp/ansible-lab-49/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \
