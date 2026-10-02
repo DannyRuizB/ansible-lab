@@ -1,0 +1,255 @@
+# =============================================================================
+# Playbook 49 — Fallos en flota: any_errors_fatal y max_fail_percentage
+#
+# Por defecto, un host que falla se cae él solo y el resto sigue: el play
+# acaba con la flota a medias y un rc 2 que nadie lee hasta el final. Dos
+# palancas cambian eso, y las dos tienen letra pequeña. Cinco escenas,
+# medidas contra ansible-core 2.21 antes de escribirlas, cada una sobre un
+# inventario interior de 5 hosts falsos (h1..h5, connection local) en el que
+# se elige quién falla:
+#
+#   - Escena 1 (por defecto): falla h2; h1, h3, h4 y h5 hacen la tarea
+#     siguiente. rc 2.
+#
+#   - Escena 2 (any_errors_fatal): falla h2 y NADIE hace la tarea siguiente:
+#     el primer fallo para la flota entera. rc 2.
+#
+#   - Escena 3 (el borde de max_fail_percentage): con 2 de 5 fallando (40 %),
+#     `max_fail_percentage: 40` SIGUE - hay que SUPERAR el porcentaje - y
+#     `39` aborta. Y al abortar no corre ni el play siguiente.
+#
+#   - Escena 4 (serial, LA TRAMPA): el porcentaje se cuenta POR LOTE. Con
+#     `serial: 2` y `max_fail_percentage: 49`, un solo fallo de 5 (el 20 %
+#     de la flota) es el 50 % de su lote: el play aborta y h5 no llega a
+#     ejecutarse nunca.
+#
+#   - Escena 5 (lo que no cuenta): un fallo recogido por `rescue`, o con
+#     `ignore_errors`, no es un fallo para any_errors_fatal: los cinco hacen
+#     la tarea siguiente y el rc es 0.
+#
+# Regla de andar por casa: any_errors_fatal para cambios que no pueden quedar
+# a medias (un esquema, un certificado); max_fail_percentage para despliegues
+# por lotes, calculado sobre el TAMAÑO DEL LOTE y no de la flota; y recordar
+# que rescue e ignore_errors "arreglan" el fallo también a ojos de los dos.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/49_fallos_en_flota.yml
+# ...el CI lo ejecuta esperando rc 0 y comprobando la marca final.
+# =============================================================================
+
+- name: "Escenas de fallos en flota medidas en playbooks interiores"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    dir_49: /tmp/ansible-lab-49
+    # Las órdenes anidadas heredan el ansible.cfg del lab (que pide un vault):
+    # el idiom de los playbooks 43-48.
+    entorno_49:
+      ANSIBLE_VAULT_PASSWORD_FILE: /tmp/ansible-lab-49/vault_pass
+      ANSIBLE_NOCOLOR: "1"
+    inventario: |
+      [flota]
+      h1
+      h2
+      h3
+      h4
+      h5
+      [flota:vars]
+      ansible_connection=local
+      ansible_python_interpreter={{ ansible_playbook_python }}
+    # Cada interior: cabecera del play + la misma pareja de tareas (T1 falla
+    # en los hosts de `fallan`, T2 dice quién llegó).
+    tareas: |
+      tasks:
+        - name: T1 (falla donde toca)
+          ansible.builtin.command: "false"
+          when: inventory_hostname in fallan
+          changed_when: false
+        - name: T2 (quien llega)
+          ansible.builtin.debug:
+            msg: "LLEGA {{ '{{' }} inventory_hostname {{ '}}' }}"
+    interiores:
+      defecto: ""
+      fatal: "any_errors_fatal: true"
+      pct40: "max_fail_percentage: 40"
+      pct39: "max_fail_percentage: 39"
+      lotes: "serial: 2\nmax_fail_percentage: 49"
+    especiales:
+      rescate: |
+        - hosts: flota
+          gather_facts: false
+          any_errors_fatal: true
+          tasks:
+            - name: B
+              block:
+                - name: T1 (falla donde toca)
+                  ansible.builtin.command: "false"
+                  when: inventory_hostname in fallan
+                  changed_when: false
+              rescue:
+                - name: Rescate
+                  ansible.builtin.debug:
+                    msg: "rescatado"
+            - name: T2 (quien llega)
+              ansible.builtin.debug:
+                msg: "LLEGA {{ '{{' }} inventory_hostname {{ '}}' }}"
+      ignorar: |
+        - hosts: flota
+          gather_facts: false
+          any_errors_fatal: true
+          tasks:
+            - name: T1 (falla donde toca)
+              ansible.builtin.command: "false"
+              when: inventory_hostname in fallan
+              changed_when: false
+              ignore_errors: true
+            - name: T2 (quien llega)
+              ansible.builtin.debug:
+                msg: "LLEGA {{ '{{' }} inventory_hostname {{ '}}' }}"
+    # Un segundo play detrás del 39: ¿corre cuando el primero aborta?
+    segundo_play: |
+      - hosts: flota
+        gather_facts: false
+        tasks:
+          - name: Segundo play
+            ansible.builtin.debug:
+              msg: "SEGUNDO {{ '{{' }} inventory_hostname {{ '}}' }}"
+    ejecuciones:
+      - { id: defecto, fallan: '["h2"]' }
+      - { id: fatal, fallan: '["h2"]' }
+      - { id: pct40, fallan: '["h2","h4"]' }
+      - { id: pct39, fallan: '["h2","h4"]' }
+      - { id: lotes, fallan: '["h4"]' }
+      - { id: rescate, fallan: '["h2"]' }
+      - { id: ignorar, fallan: '["h2"]' }
+  tasks:
+    - name: Empezar con el directorio limpio
+      ansible.builtin.file:
+        path: "{{ dir_49 }}"
+        state: "{{ item }}"
+        mode: "0755"
+      loop: [absent, directory]
+      changed_when: false
+
+    - name: Dejar un fichero de vault (sin uso) para el ansible anidado
+      ansible.builtin.copy:
+        content: "sin-uso\n"
+        dest: "{{ entorno_49.ANSIBLE_VAULT_PASSWORD_FILE }}"
+        mode: "0600"
+      changed_when: false
+
+    - name: Escribir el inventario de la flota falsa
+      ansible.builtin.copy:
+        content: "{{ inventario }}"
+        dest: "{{ dir_49 }}/flota.ini"
+        mode: "0644"
+      changed_when: false
+
+    - name: Escribir los interiores de una cabecera + T1/T2 (el 39 lleva un segundo play)
+      ansible.builtin.copy:
+        dest: "{{ dir_49 }}/{{ item.key }}.yml"
+        content: |
+          - hosts: flota
+            gather_facts: false
+          {{ item.value | indent(2, first=true) }}
+          {{ tareas | indent(2, first=true) }}
+          {{ segundo_play if item.key == 'pct39' else '' }}
+        mode: "0644"
+      loop: "{{ interiores | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      changed_when: false
+
+    - name: Escribir los interiores con rescue e ignore_errors
+      ansible.builtin.copy:
+        dest: "{{ dir_49 }}/{{ item.key }}.yml"
+        content: "{{ item.value }}"
+        mode: "0644"
+      loop: "{{ especiales | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      changed_when: false
+
+    # Varias escenas fallan a propósito: el rc se guarda y se juzga.
+    - name: Correr cada interior y capturar lo que imprime
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook -i {{ dir_49 }}/flota.ini {{ dir_49 }}/{{ item.id }}.yml
+          -e '{"fallan": {{ item.fallan }}}'
+      loop: "{{ ejecuciones }}"
+      loop_control:
+        label: "{{ item.id }} (fallan {{ item.fallan }})"
+      register: interior
+      changed_when: false
+      failed_when: false
+      environment: "{{ entorno_49 }}"
+
+    - name: Guardar los nombres de las ejecuciones
+      ansible.builtin.set_fact:
+        ids_49: "{{ interior.results | map(attribute='item.id') | list }}"
+
+    - name: Guardar quién llegó a T2 y el código de cada ejecución
+      ansible.builtin.set_fact:
+        llegan: "{{ dict(ids_49 | zip(interior.results | map(attribute='stdout') | map('regex_findall', 'LLEGA (h[0-9])') | map('sort') | map('join', ','))) }}"
+        rc_49: "{{ dict(interior.results | map(attribute='item.id') | zip(interior.results | map(attribute='rc'))) }}"
+        out_49: "{{ dict(interior.results | map(attribute='item.id') | zip(interior.results | map(attribute='stdout'))) }}"
+
+    - name: "Escena 1 — veredicto (por defecto, el que falla se cae solo)"
+      ansible.builtin.assert:
+        that:
+          - llegan.defecto == 'h1,h3,h4,h5'
+          - rc_49.defecto == 2
+        success_msg: "Falló h2 y llegaron a T2 {{ llegan.defecto }}; rc {{ rc_49.defecto }}."
+        fail_msg: "el comportamiento por defecto no fue el medido:\n{{ out_49.defecto }}"
+
+    - name: "Escena 2 — veredicto (any_errors_fatal para la flota entera)"
+      ansible.builtin.assert:
+        that:
+          - llegan.fatal == ''
+          - rc_49.fatal == 2
+          - out_49.fatal is search('fatal. \\[h2\\]')
+        success_msg: "Falló h2 y no llegó NADIE a T2; rc {{ rc_49.fatal }}."
+        fail_msg: "any_errors_fatal no se comportó como se midió:\n{{ out_49.fatal }}"
+
+    - name: "Escena 3 — veredicto (hay que SUPERAR el porcentaje; al abortar no corre el play siguiente)"
+      ansible.builtin.assert:
+        that:
+          - llegan.pct40 == 'h1,h3,h5'
+          - llegan.pct39 == ''
+          - out_49.pct39 is search('NO MORE HOSTS LEFT')
+          - "'SEGUNDO' not in out_49.pct39"
+          - out_49.pct39 is search('fatal. \\[h4\\]')
+        success_msg: >-
+          2 de 5 (40 %): con max 40 siguieron {{ llegan.pct40 }}; con max 39 se abortó,
+          y el segundo play no imprimió nada.
+        fail_msg: "el borde de max_fail_percentage no fue el medido:\n{{ out_49.pct39 }}"
+
+    - name: "Escena 4 — veredicto (serial: el porcentaje es POR LOTE)"
+      ansible.builtin.assert:
+        that:
+          - llegan.lotes == 'h1,h2'
+          - "'LLEGA h5' not in out_49.lotes"
+          - out_49.lotes is search('fatal. \\[h4\\]')
+          - rc_49.lotes == 2
+        success_msg: >-
+          Un fallo de 5 (20 %) con max 49: en su lote (h3,h4) era el 50 %, el play abortó
+          y h5 no llegó a ejecutarse. Solo llegaron {{ llegan.lotes }}.
+        fail_msg: "serial + max_fail_percentage no se comportó como se midió:\n{{ out_49.lotes }}"
+
+    - name: "Escena 5 — veredicto (rescue e ignore_errors no cuentan como fallo)"
+      ansible.builtin.assert:
+        that:
+          - llegan.rescate == 'h1,h2,h3,h4,h5'
+          - llegan.ignorar == 'h1,h2,h3,h4,h5'
+          - rc_49.rescate == 0
+          - rc_49.ignorar == 0
+          - out_49.rescate is search('rescatado')
+        success_msg: "Con rescue y con ignore_errors llegaron los cinco y el rc fue 0, aun con any_errors_fatal."
+        fail_msg: "rescue / ignore_errors no se comportaron como se midió:\n{{ out_49.rescate }}"
+
+    - name: Dejar la marca final para el CI (todas las escenas pasaron)
+      ansible.builtin.copy:
+        dest: "{{ dir_49 }}/TODAS-LAS-ESCENAS-OK"
+        content: "ok\n"
+        mode: "0644"
+      changed_when: false
