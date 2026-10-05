@@ -377,6 +377,15 @@ jobs:
           ansible-playbook playbooks/49_fallos_en_flota.yml
           test -f /tmp/ansible-lab-49/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
 
+      # order del play: sorted es orden de cadena (h10 antes que h2), con
+      # serial el canario sale de la lista ordenada, run_once sigue order pero
+      # ansible_play_hosts_all y groups NO, shuffle sortea en cada pasada y sin
+      # order manda el patrón (db:web).
+      - name: "Playbook 50 — order del play (asserts incluidos)"
+        run: |
+          ansible-playbook playbooks/50_order_del_play.yml
+          test -f /tmp/ansible-lab-50/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \
