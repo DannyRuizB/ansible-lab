@@ -1,0 +1,165 @@
+# =============================================================================
+# Playbook 51 — Patrones de hosts: a quién le toca de verdad
+#
+# El campo `hosts:` (y el argumento `--limit`) no es un nombre de grupo: es un
+# PATRON que se evalua de izquierda a derecha. Los `:` unen, `:&` intersecan y
+# `:!` restan, y hay rangos e incluso expresiones regulares. Equivocarse no da
+# error: da una flota distinta de la que creias, o NINGUNA. Siete escenas,
+# medidas contra ansible-core 2.21 antes de escribirlas, sobre un inventario
+# interior (connection local) con grupos que se solapan a propósito:
+#
+#     [web]  w1 w2 w3        [db]    d1 d2
+#     [prod] w1 d1           [stage] w2 d2
+#
+#   - Escena 1 (union, `web:db`): los dos grupos juntos -> d1,d2,w1,w2,w3.
+#
+#   - Escena 2 (interseccion, `web:&prod`): solo los que estan en AMBOS -> w1.
+#
+#   - Escena 3 (resta, `all:!stage`): todos menos los de stage -> d1,w1,w3.
+#
+#   - Escena 4 (combinacion de izquierda a derecha, `web:db:&prod:!stage`):
+#     primero la union (w1,w2,w3,d1,d2), luego interseca con prod (w1,d1),
+#     luego quita stage (no habia ninguno) -> d1,w1. El ORDEN importa.
+#
+#   - Escena 5 (rangos): `web[0]` es el PRIMERO (indice 0) -> w1; `web[1:2]`
+#     es un corte 0-indexado e INCLUSIVO (indices 1 y 2) -> w2,w3; `web[-1]`
+#     es el ultimo -> w3. La trampa clasica: `[1:2]` son DOS hosts, no uno.
+#
+#   - Escena 6 (LA TRAMPA, interseccion vacia `web:&prod:&stage`): web ∩ prod
+#     ∩ stage = {}. El play no casa NINGUN host, y Ansible no da error: lo
+#     salta con rc 0 ("skipping: no hosts matched"). Un `--limit` demasiado
+#     fino "no hace nada" sin quejarse.
+#
+#   - Escena 7 (regex, `~w.*`): un patron que empieza por `~` es una expresion
+#     regular sobre el nombre -> w1,w2,w3.
+#
+# Regla de andar por casa: cuando un play "no toca" a quien esperabas,
+# imprime `ansible_play_hosts_all` (o `ansible-inventory --list --limit PAT`)
+# antes de dudar del inventario; recuerda que `:&`/`:!` actuan sobre todo lo
+# acumulado a su izquierda, y que los rangos son 0-indexados e inclusivos.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/51_patrones_de_hosts.yml
+# ...el CI lo ejecuta esperando rc 0 y comprobando la marca final.
+# =============================================================================
+
+- name: "Escenas de patrones de hosts medidas en un playbook interior"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    dir_51: /tmp/ansible-lab-51
+    entorno_51:
+      ANSIBLE_VAULT_PASSWORD_FILE: /tmp/ansible-lab-51/vault_pass
+      ANSIBLE_NOCOLOR: "1"
+    inventario: |
+      [web]
+      w1
+      w2
+      w3
+      [db]
+      d1
+      d2
+      [prod]
+      w1
+      d1
+      [stage]
+      w2
+      d2
+      [all:vars]
+      ansible_connection=local
+      ansible_python_interpreter={{ ansible_playbook_python }}
+    # Un interior parametrizable: imprime la seleccion ordenada una vez.
+    interior: |
+      - hosts: "{{ '{{' }} pat {{ '}}' }}"
+        gather_facts: false
+        tasks:
+          - ansible.builtin.debug:
+              msg: "SEL {{ '{{' }} ansible_play_hosts_all | sort | join(',') {{ '}}' }}"
+            run_once: true
+    # Cada escena: un patron y lo que debe seleccionar (ordenado).
+    escenas:
+      - { id: union, pat: "web:db", sel: "d1,d2,w1,w2,w3" }
+      - { id: interseca, pat: "web:&prod", sel: "w1" }
+      - { id: resta, pat: "all:!stage", sel: "d1,w1,w3" }
+      - { id: combina, pat: "web:db:&prod:!stage", sel: "d1,w1" }
+      - { id: primero, pat: "web[0]", sel: "w1" }
+      - { id: corte, pat: "web[1:2]", sel: "w2,w3" }
+      - { id: ultimo, pat: "web[-1]", sel: "w3" }
+      - { id: vacia, pat: "web:&prod:&stage", sel: "" }
+      - { id: regex, pat: "~w.*", sel: "w1,w2,w3" }
+  tasks:
+    - name: Empezar con el directorio limpio
+      ansible.builtin.file:
+        path: "{{ dir_51 }}"
+        state: "{{ item }}"
+        mode: "0755"
+      loop: [absent, directory]
+      changed_when: false
+
+    - name: Dejar un fichero de vault (sin uso) para el ansible anidado
+      ansible.builtin.copy:
+        content: "sin-uso\n"
+        dest: "{{ entorno_51.ANSIBLE_VAULT_PASSWORD_FILE }}"
+        mode: "0600"
+      changed_when: false
+
+    - name: Escribir el inventario con grupos que se solapan
+      ansible.builtin.copy:
+        content: "{{ inventario }}"
+        dest: "{{ dir_51 }}/flota.ini"
+        mode: "0644"
+      changed_when: false
+
+    - name: Escribir el interior parametrizable
+      ansible.builtin.copy:
+        content: "{{ interior }}"
+        dest: "{{ dir_51 }}/interior.yml"
+        mode: "0644"
+      changed_when: false
+
+    - name: Correr el interior con cada patron
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook -i {{ dir_51 }}/flota.ini {{ dir_51 }}/interior.yml
+          -e pat={{ item.pat | quote }}
+      loop: "{{ escenas }}"
+      loop_control:
+        label: "{{ item.id }} ({{ item.pat }})"
+      register: corridas
+      changed_when: false
+      environment: "{{ entorno_51 }}"
+
+    - name: Recoger la seleccion de cada patron (vacia si no caso ninguno)
+      ansible.builtin.set_fact:
+        sel_51: >-
+          {{ dict(escenas | map(attribute='id') | zip(
+               corridas.results | map(attribute='stdout')
+               | map('regex_search', 'SEL ([a-z0-9,]*)', '\1')
+               | map('default', [''], true) | map('first') )) }}
+        out_51: "{{ dict(escenas | map(attribute='id') | zip(corridas.results | map(attribute='stdout'))) }}"
+        rc_51: "{{ dict(escenas | map(attribute='id') | zip(corridas.results | map(attribute='rc'))) }}"
+
+    - name: "Veredicto — cada patron selecciona exactamente lo medido"
+      ansible.builtin.assert:
+        that:
+          - sel_51[item.id] == item.sel
+        success_msg: "{{ item.id }}: `{{ item.pat }}` -> {{ item.sel if item.sel else '(ningun host)' }}"
+        fail_msg: "{{ item.id }}: `{{ item.pat }}` dio '{{ sel_51[item.id] }}', se media '{{ item.sel }}'\n{{ out_51[item.id] }}"
+      loop: "{{ escenas }}"
+      loop_control:
+        label: "{{ item.id }}"
+
+    - name: "Veredicto — la interseccion vacia se SALTA con rc 0 (no es un error)"
+      ansible.builtin.assert:
+        that:
+          - out_51.vacia is search('no hosts matched')
+          - rc_51.vacia | int == 0
+        success_msg: "web:&prod:&stage no caso ningun host y el interior acabo en rc 0 (skip silencioso)."
+        fail_msg: "la interseccion vacia no se comporto como se midio:\n{{ out_51.vacia }}"
+
+    - name: Dejar la marca final para el CI (todas las escenas pasaron)
+      ansible.builtin.copy:
+        dest: "{{ dir_51 }}/TODAS-LAS-ESCENAS-OK"
+        content: "ok\n"
+        mode: "0644"
+      changed_when: false
