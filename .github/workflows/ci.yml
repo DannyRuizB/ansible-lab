@@ -386,6 +386,14 @@ jobs:
           ansible-playbook playbooks/50_order_del_play.yml
           test -f /tmp/ansible-lab-50/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
 
+      # Patrones de hosts: `:` une, `:&` interseca, `:!` resta (de izquierda a
+      # derecha), los rangos [x:y] son 0-indexados e inclusivos, y una
+      # interseccion vacia se SALTA con rc 0 (no es un error).
+      - name: "Playbook 51 — patrones de hosts (asserts incluidos)"
+        run: |
+          ansible-playbook playbooks/51_patrones_de_hosts.yml
+          test -f /tmp/ansible-lab-51/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \
