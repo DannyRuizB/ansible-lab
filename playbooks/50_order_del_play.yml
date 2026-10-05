@@ -1,0 +1,214 @@
+# =============================================================================
+# Playbook 50 — order del play: quién va primero (y quién NO se entera)
+#
+# `order:` decide en qué orden recorre el play sus hosts: quién ejecuta antes
+# cada tarea, quién cae en el primer lote de `serial` (el canario) y quién
+# hace el `run_once`. Parece un detalle cosmético hasta que el canario no es
+# el que creías. Seis escenas, medidas contra ansible-core 2.21 antes de
+# escribirlas, sobre un inventario interior de 5 hosts falsos escrito a
+# propósito desordenado ([web] h2 h10 h1, [db] h3 h20; connection local) y
+# con `-f 1`, para que el orden de salida sea el de ejecución:
+#
+#   - Escena 1 (por defecto, `inventory`): el orden del fichero, no el
+#     alfabético: h2, h10, h1, h3, h20.
+#
+#   - Escena 2 (`sorted`): orden de CADENA, no "natural": h1, h10, h2, h20,
+#     h3. web10 va antes que web2.
+#
+#   - Escena 3 (`sorted` + `serial: 1`): los lotes salen de la lista ya
+#     ordenada, así que el canario es h1 y el SEGUNDO host tocado es h10,
+#     no h2.
+#
+#   - Escena 4 (LA TRAMPA, `reverse_inventory`): el `run_once` lo hace h20
+#     (el primero del orden del play), pero `ansible_play_hosts_all[0]` sigue
+#     siendo h2, y `groups['all'][0]` también: esas listas NO siguen `order`.
+#     Un "líder" elegido con `ansible_play_hosts_all[0]` y un paso con
+#     `run_once` caen en máquinas distintas.
+#
+#   - Escena 5 (`shuffle`): cada ejecución sortea de nuevo. Ocho ejecuciones
+#     del mismo play no eligen siempre el mismo host para el `run_once`: con
+#     shuffle, el canario y el que migra el esquema cambian en cada pasada.
+#
+#   - Escena 6 (el patrón también ordena): sin `order`, `hosts: db:web` va
+#     en el orden del PATRÓN — h3, h20 y luego h2, h10, h1 —, no en el del
+#     fichero.
+#
+# Regla de andar por casa: si importa quién va primero, dilo con `order` y
+# compruébalo con `ansible_play_batch` (sí sigue el orden), no con
+# `ansible_play_hosts_all` ni `groups[...]`; nada de `sorted` con nombres
+# numerados sin ceros a la izquierda; y `shuffle` nunca con `run_once` ni
+# con un canario que tenga que ser siempre el mismo.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/50_order_del_play.yml
+# ...el CI lo ejecuta esperando rc 0 y comprobando la marca final.
+# =============================================================================
+
+- name: "Escenas de order medidas en playbooks interiores"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    dir_50: /tmp/ansible-lab-50
+    # Las órdenes anidadas heredan el ansible.cfg del lab (que pide un vault):
+    # el idiom de los playbooks 43-49.
+    entorno_50:
+      ANSIBLE_VAULT_PASSWORD_FILE: /tmp/ansible-lab-50/vault_pass
+      ANSIBLE_NOCOLOR: "1"
+    inventario: |
+      [web]
+      h2
+      h10
+      h1
+      [db]
+      h3
+      h20
+      [all:vars]
+      ansible_connection=local
+      ansible_python_interpreter={{ ansible_playbook_python }}
+    # Cada interior: cabecera del play + la misma pareja de tareas (PASA en
+    # cada host, en el orden en que pasa; y un run_once que dice quién lo
+    # hizo, quién es el primero de ansible_play_hosts_all y de groups, y
+    # qué lote corre).
+    tareas: |
+      tasks:
+        - name: Pasa
+          ansible.builtin.debug:
+            msg: "PASA {{ '{{' }} inventory_hostname {{ '}}' }}"
+        - name: Run once
+          ansible.builtin.debug:
+            msg: >-
+              RUNONCE {{ '{{' }} inventory_hostname {{ '}}' }}
+              LIDER {{ '{{' }} ansible_play_hosts_all[0] {{ '}}' }}
+              GRUPO {{ '{{' }} groups['all'][0] {{ '}}' }}
+              LOTE {{ '{{' }} ansible_play_batch | join(',') {{ '}}' }}
+          run_once: true
+    interiores:
+      defecto: "hosts: all"
+      sorted: "hosts: all\norder: sorted"
+      lotes: "hosts: all\norder: sorted\nserial: 1"
+      reverso: "hosts: all\norder: reverse_inventory"
+      shuffle: "hosts: all\norder: shuffle"
+      patron: "hosts: db:web"
+    ejecuciones: "{{ ['defecto', 'sorted', 'lotes', 'reverso', 'patron'] + ['shuffle'] * 8 }}"
+  tasks:
+    - name: Empezar con el directorio limpio
+      ansible.builtin.file:
+        path: "{{ dir_50 }}"
+        state: "{{ item }}"
+        mode: "0755"
+      loop: [absent, directory]
+      changed_when: false
+
+    - name: Dejar un fichero de vault (sin uso) para el ansible anidado
+      ansible.builtin.copy:
+        content: "sin-uso\n"
+        dest: "{{ entorno_50.ANSIBLE_VAULT_PASSWORD_FILE }}"
+        mode: "0600"
+      changed_when: false
+
+    - name: Escribir el inventario desordenado a propósito
+      ansible.builtin.copy:
+        content: "{{ inventario }}"
+        dest: "{{ dir_50 }}/flota.ini"
+        mode: "0644"
+      changed_when: false
+
+    - name: Escribir los interiores (cabecera + PASA / run_once)
+      ansible.builtin.copy:
+        dest: "{{ dir_50 }}/{{ item.key }}.yml"
+        content: |
+          - gather_facts: false
+          {{ item.value | indent(2, first=true) }}
+          {{ tareas | indent(2, first=true) }}
+        mode: "0644"
+      loop: "{{ interiores | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      changed_when: false
+
+    - name: Correr cada interior con -f 1 y capturar lo que imprime
+      ansible.builtin.command:
+        cmd: ansible-playbook -f 1 -i {{ dir_50 }}/flota.ini {{ dir_50 }}/{{ item }}.yml
+      loop: "{{ ejecuciones }}"
+      loop_control:
+        label: "{{ item }}"
+      register: interior
+      changed_when: false
+      environment: "{{ entorno_50 }}"
+
+    - name: Guardar el orden de paso y lo que dijo el run_once de cada ejecución
+      ansible.builtin.set_fact:
+        pasa: "{{ interior.results | map(attribute='stdout') | map('regex_findall', 'PASA (h[0-9]+)') | map('join', ',') | list }}"
+        runonce: "{{ interior.results | map(attribute='stdout') | map('regex_findall', 'RUNONCE (h[0-9]+)') | list }}"
+        lider: "{{ interior.results | map(attribute='stdout') | map('regex_findall', 'LIDER (h[0-9]+)') | list }}"
+        grupo: "{{ interior.results | map(attribute='stdout') | map('regex_findall', 'GRUPO (h[0-9]+)') | list }}"
+        lotes: "{{ interior.results | map(attribute='stdout') | map('regex_findall', 'LOTE (h[0-9]+(?:,h[0-9]+)*)') | list }}"
+
+    - name: Indexar por escena (las ocho de shuffle aparte)
+      ansible.builtin.set_fact:
+        pasa_50: "{{ dict(ejecuciones[:5] | zip(pasa[:5])) }}"
+        runonce_50: "{{ dict(ejecuciones[:5] | zip(runonce[:5])) }}"
+        lotes_50: "{{ dict(ejecuciones[:5] | zip(lotes[:5])) }}"
+        out_50: "{{ dict(ejecuciones[:5] | zip(interior.results[:5] | map(attribute='stdout'))) }}"
+        shuffle_pasa: "{{ pasa[5:] }}"
+        shuffle_runonce: "{{ runonce[5:] | map('first') | list }}"
+
+    - name: "Escena 1 — veredicto (por defecto, el orden del fichero)"
+      ansible.builtin.assert:
+        that:
+          - pasa_50.defecto == 'h2,h10,h1,h3,h20'
+          - runonce_50.defecto == ['h2']
+        success_msg: "Sin order pasaron {{ pasa_50.defecto }}: el orden del fichero, y el run_once lo hizo h2."
+        fail_msg: "el orden por defecto no fue el medido:\n{{ out_50.defecto }}"
+
+    - name: "Escena 2 — veredicto (sorted es orden de cadena: h10 antes que h2)"
+      ansible.builtin.assert:
+        that:
+          - pasa_50.sorted == 'h1,h10,h2,h20,h3'
+        success_msg: "Con sorted pasaron {{ pasa_50.sorted }}: h10 va antes que h2."
+        fail_msg: "sorted no ordenó como se midió:\n{{ out_50.sorted }}"
+
+    - name: "Escena 3 — veredicto (con serial, el canario sale de la lista ya ordenada)"
+      ansible.builtin.assert:
+        that:
+          - lotes_50.lotes == ['h1', 'h10', 'h2', 'h20', 'h3']
+        success_msg: "sorted + serial 1: los lotes fueron {{ lotes_50.lotes | join(' → ') }}; el segundo host tocado es h10."
+        fail_msg: "los lotes no salieron en el orden medido:\n{{ out_50.lotes }}"
+
+    - name: "Escena 4 — veredicto (run_once sigue order; ansible_play_hosts_all y groups NO)"
+      ansible.builtin.assert:
+        that:
+          - pasa_50.reverso == 'h20,h3,h1,h10,h2'
+          - runonce_50.reverso == ['h20']
+          - lider[3] == ['h2']
+          - grupo[3] == ['h2']
+          - lotes_50.reverso == ['h20,h3,h1,h10,h2']
+        success_msg: >-
+          reverse_inventory: el run_once lo hizo h20, pero ansible_play_hosts_all[0] y groups['all'][0]
+          siguen siendo h2. ansible_play_batch sí va en el orden del play.
+        fail_msg: "el run_once o las listas no fueron lo medido:\n{{ out_50.reverso }}"
+
+    - name: "Escena 5 — veredicto (shuffle sortea en cada pasada)"
+      ansible.builtin.assert:
+        that:
+          - shuffle_pasa | map('split', ',') | map('sort') | map('join', ',') | unique == ['h1,h10,h2,h20,h3']
+          - shuffle_runonce | unique | length > 1
+          - shuffle_pasa | unique | length > 1
+        success_msg: >-
+          8 pasadas con shuffle: siempre los cinco hosts, pero el run_once cayó en
+          {{ shuffle_runonce | unique | sort | join(', ') }}.
+        fail_msg: "shuffle no sorteó como se midió: {{ shuffle_pasa }}"
+
+    - name: "Escena 6 — veredicto (sin order, el patrón db:web manda)"
+      ansible.builtin.assert:
+        that:
+          - pasa_50.patron == 'h3,h20,h2,h10,h1'
+        success_msg: "hosts: db:web pasó {{ pasa_50.patron }}: primero el grupo que nombra el patrón."
+        fail_msg: "el patrón no ordenó como se midió:\n{{ out_50.patron }}"
+
+    - name: Dejar la marca final para el CI (todas las escenas pasaron)
+      ansible.builtin.copy:
+        dest: "{{ dir_50 }}/TODAS-LAS-ESCENAS-OK"
+        content: "ok\n"
+        mode: "0644"
+      changed_when: false
