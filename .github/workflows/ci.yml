@@ -394,6 +394,14 @@ jobs:
           ansible-playbook playbooks/51_patrones_de_hosts.yml
           test -f /tmp/ansible-lab-51/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
 
+      # vars_prompt: sin terminal (como aquí) no se pregunta y, sin default, la
+      # variable vale el TEXTO "None"; con terminal (pty manejada por un driver
+      # en Python) lo tecleado se renderiza como plantilla salvo `unsafe: true`.
+      - name: "Playbook 52 — vars_prompt a fondo (asserts incluidos, parte con pty)"
+        run: |
+          ansible-playbook playbooks/52_vars_prompt_a_fondo.yml
+          test -f /tmp/ansible-lab-52/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \
