@@ -1,0 +1,320 @@
+# =============================================================================
+# Playbook 52 — vars_prompt a fondo: lo que se pregunta, lo que no, y cómo
+#
+# `vars_prompt` pide valores al arrancar el play. Parece trivial y esconde
+# varias trampas que solo aparecen fuera del terminal de quien lo escribió:
+# en el CI, en un cron, o cuando el usuario teclea algo "raro". Ocho escenas,
+# medidas contra ansible-core 2.21 antes de escribirlas. Las cinco primeras
+# corren SIN terminal (como el CI); las tres últimas con una pseudoterminal
+# de verdad, que maneja un pequeño driver en Python (solo librería estándar)
+# que espera cada pregunta antes de contestar:
+#
+#   - Escena 1 (sin terminal, con default): Ansible NO pregunta ("Not
+#     prompting as we are not in interactive mode") y usa el `default`.
+#     Meterle texto por stdin no cambia nada: sin tty no hay pregunta.
+#
+#   - Escena 2 (LA TRAMPA, sin terminal y SIN default): la variable no queda
+#     indefinida ni nula: vale el TEXTO "None". `is none` es False, `is
+#     defined` es True y `| default('x')` no la salva. El play sigue con rc 0
+#     y un `when: clave is none` nunca salta.
+#
+#   - Escena 3 (precedencia): el valor del prompt pisa a `vars:` del mismo
+#     play; `-e` pisa al prompt y además hace que NO se pregunte.
+#
+#   - Escena 4 (alcance): la variable del prompt solo vive en SU play; el
+#     segundo play no la ve. La de `-e` sí llega a todos.
+#
+#   - Escena 5 (el default se renderiza): `default: "{{ 40 + 2 }}"` da 42.
+#
+#   - Escena 6 (LA OTRA TRAMPA, interactivo): lo que TECLEA el usuario también
+#     se renderiza como plantilla: escribir `{{ 6 * 7 }}` deja 42 en la
+#     variable. Con `unsafe: true` se queda literal. Si el valor viene de
+#     fuera (un nombre, una contraseña con llaves), `unsafe: true`.
+#
+#   - Escena 7 (private + confirm + encrypt): con `private` no se ve lo que se
+#     escribe; con `confirm`, si las dos no coinciden avisa ("VALUES ENTERED
+#     DO NOT MATCH") y vuelve a preguntar; `encrypt: sha512_crypt` guarda el
+#     hash ($6$...), nunca el texto.
+#
+#   - Escena 8 (-e en interactivo): con un terminal delante, `-e var=x` evita
+#     esa pregunta concreta; las demás se hacen igual.
+#
+# Regla de andar por casa: todo prompt que pueda correr sin terminal necesita
+# `default` (o validar el valor con un assert, contando con el "None" en
+# texto); todo prompt cuyo valor venga de una persona, `unsafe: true`; y para
+# automatizar, `-e`, nunca stdin.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/52_vars_prompt_a_fondo.yml
+# ...el CI lo ejecuta esperando rc 0 y comprobando la marca final.
+# =============================================================================
+
+- name: "Escenas de vars_prompt medidas en playbooks interiores"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    dir_52: /tmp/ansible-lab-52
+    entorno_52:
+      ANSIBLE_VAULT_PASSWORD_FILE: /tmp/ansible-lab-52/vault_pass
+      ANSIBLE_NOCOLOR: "1"
+    # Escenas 1-5: un play con prompts y otro detrás. Cada uno deja lo que vio
+    # en un JSON para que el exterior lo compare (sin pelearse con el stdout).
+    sin_tty: !unsafe |
+      - name: con prompts
+        hosts: localhost
+        gather_facts: false
+        vars:
+          pisada: "de-vars-del-play"
+        vars_prompt:
+          - name: pisada
+            prompt: "pisada"
+            default: "del-prompt"
+            private: false
+          - name: sin_default
+            prompt: "sin default"
+            private: false
+          - name: plantilla
+            prompt: "plantilla"
+            default: "{{ 40 + 2 }}"
+            private: false
+        tasks:
+          - name: Guardar lo visto en el primer play
+            ansible.builtin.copy:
+              dest: "{{ salida }}-1.json"
+              mode: "0644"
+              content: "{{ {'pisada': pisada, 'sin_default': sin_default,
+                            'tipo': sin_default | type_debug,
+                            'es_none': sin_default is none,
+                            'definida': sin_default is defined,
+                            'con_default_filtro': sin_default | default('X'),
+                            'plantilla': plantilla | string} | to_json }}"
+      - name: segundo play
+        hosts: localhost
+        gather_facts: false
+        tasks:
+          - name: Guardar lo visto en el segundo play
+            ansible.builtin.copy:
+              dest: "{{ salida }}-2.json"
+              mode: "0644"
+              content: "{{ {'pisada': pisada | default('NO-DEFINIDA')} | to_json }}"
+    # Escenas 6-8: prompts que solo existen con un terminal delante.
+    interactivo: !unsafe |
+      - name: interactivo
+        hosts: localhost
+        gather_facts: false
+        vars_prompt:
+          - name: texto
+            prompt: "texto"
+            private: false
+          - name: texto_unsafe
+            prompt: "texto unsafe"
+            private: false
+            unsafe: true
+          - name: clave
+            prompt: "clave"
+            private: true
+            confirm: true
+          - name: hash
+            prompt: "hash"
+            private: false
+            encrypt: sha512_crypt
+            salt_size: 8
+        tasks:
+          - name: Guardar lo visto
+            ansible.builtin.copy:
+              dest: "{{ salida }}.json"
+              mode: "0644"
+              content: "{{ {'texto': texto | string, 'texto_unsafe': texto_unsafe,
+                            'clave': clave, 'hash': hash} | to_json }}"
+    # Driver de pseudoterminal: espera cada pregunta (regex) y contesta. Las
+    # respuestas van en un JSON para que nadie renderice sus llaves por el
+    # camino. Escribirlo todo de golpe NO vale: getpass vacía lo que ya está
+    # en cola en el terminal antes de leer (medido: EOFError).
+    driver: !unsafe |
+      import json, os, pty, re, select, sys, time
+      pares = json.load(open(sys.argv[1]))
+      pid, fd = pty.fork()
+      if pid == 0:
+          os.execvp(sys.argv[2], sys.argv[2:])
+      buf, todo, paso, limite = b"", b"", 0, time.time() + 120
+      while time.time() < limite:
+          if select.select([fd], [], [], 0.2)[0]:
+              try:
+                  trozo = os.read(fd, 4096)
+              except OSError:
+                  break
+              if not trozo:
+                  break
+              buf += trozo
+              todo += trozo
+          if paso < len(pares) and re.search(pares[paso][0].encode(), buf):
+              time.sleep(0.3)
+              os.write(fd, pares[paso][1].encode() + b"\n")
+              buf, paso = b"", paso + 1
+      _, estado = os.waitpid(pid, 0)
+      sys.stdout.write(todo.decode(errors="replace").replace("\r", ""))
+      print(f"\nDRIVER rc={os.waitstatus_to_exitcode(estado)} contestadas={paso}/{len(pares)}")
+    # Lo que se teclea en la escena 6 (literal: con llaves y todo).
+    tecleado: !unsafe "{{ 6 * 7 }}"
+    respuestas_completas: !unsafe
+      - ["(^|\\n)texto: ", "{{ 6 * 7 }}"]
+      - ["texto unsafe: ", "{{ 6 * 7 }}"]
+      - ["(^|\\n)clave: ", "uno1111"]
+      - ["confirm clave: ", "dos2222"]
+      - ["(^|\\n)clave: ", "s3creta"]
+      - ["confirm clave: ", "s3creta"]
+      - ["hash: ", "hola"]
+    # Con `-e texto=...` la primera pregunta no llega: el driver empieza por
+    # la segunda.
+    respuestas_sin_texto: !unsafe
+      - ["texto unsafe: ", "literal"]
+      - ["(^|\\n)clave: ", "s3creta"]
+      - ["confirm clave: ", "s3creta"]
+      - ["hash: ", "hola"]
+  tasks:
+    - name: Empezar con el directorio limpio
+      ansible.builtin.file:
+        path: "{{ dir_52 }}"
+        state: "{{ item }}"
+        mode: "0755"
+      loop: [absent, directory]
+      changed_when: false
+
+    - name: Dejar un fichero de vault (sin uso) para el ansible anidado
+      ansible.builtin.copy:
+        content: "sin-uso\n"
+        dest: "{{ entorno_52.ANSIBLE_VAULT_PASSWORD_FILE }}"
+        mode: "0600"
+      changed_when: false
+
+    - name: Escribir los interiores, el driver y las respuestas
+      ansible.builtin.copy:
+        content: "{{ item.content }}"
+        dest: "{{ dir_52 }}/{{ item.file }}"
+        mode: "0644"
+      loop:
+        - { file: sin_tty.yml, content: "{{ sin_tty }}" }
+        - { file: interactivo.yml, content: "{{ interactivo }}" }
+        - { file: driver.py, content: "{{ driver }}" }
+        - { file: completas.json, content: "{{ respuestas_completas | to_json }}" }
+        - { file: sin_texto.json, content: "{{ respuestas_sin_texto | to_json }}" }
+      loop_control:
+        label: "{{ item.file }}"
+      changed_when: false
+
+    # Escenas 1-5: el módulo command no tiene terminal, igual que el CI. La
+    # segunda corrida mete texto por stdin para demostrar que da igual.
+    - name: Correr el interior sin terminal (sin -e, con texto por stdin, y con -e)
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook -i localhost, -c local {{ dir_52 }}/sin_tty.yml
+          -e salida={{ dir_52 }}/{{ item.id }} -e ansible_python_interpreter={{ ansible_playbook_python }} {{ item.extra }}
+        stdin: "{{ item.stdin | default(omit) }}"
+      loop:
+        - { id: solo, extra: "" }
+        - { id: stdin, extra: "", stdin: "uno\ndos\ntres" }
+        - { id: con_e, extra: "-e pisada=desde-e -e sin_default=desde-e" }
+      loop_control:
+        label: "{{ item.id }}"
+      register: sin_tty_runs
+      changed_when: false
+      environment: "{{ entorno_52 }}"
+
+    # Escenas 6-8: con pseudoterminal.
+    - name: Correr el interior con terminal (todas las preguntas, y con -e texto)
+      ansible.builtin.command:
+        cmd: >-
+          {{ ansible_playbook_python }} -I {{ dir_52 }}/driver.py {{ dir_52 }}/{{ item.respuestas }}
+          ansible-playbook -i localhost, -c local {{ dir_52 }}/interactivo.yml
+          -e salida={{ dir_52 }}/{{ item.id }} -e ansible_python_interpreter={{ ansible_playbook_python }} {{ item.extra }}
+      loop:
+        - { id: tty, respuestas: completas.json, extra: "" }
+        - { id: tty_e, respuestas: sin_texto.json, extra: "-e texto=desde-e" }
+      loop_control:
+        label: "{{ item.id }}"
+      register: tty_runs
+      changed_when: false
+      environment: "{{ entorno_52 }}"
+
+    - name: Leer lo que vio cada corrida
+      ansible.builtin.set_fact:
+        visto: >-
+          {{ visto | default({}) | combine({item: lookup('ansible.builtin.file', dir_52 ~ '/' ~ item ~ '.json') | from_json}) }}
+      loop: [solo-1, solo-2, stdin-1, con_e-1, con_e-2, tty, tty_e]
+
+    - name: "Veredicto 1 — sin terminal no se pregunta y se usa el default (stdin no cambia nada)"
+      ansible.builtin.assert:
+        that:
+          # El aviso sale por stderr (medido), no por stdout.
+          - sin_tty_runs.results[0].stderr is search('Not prompting as we are not in interactive mode')
+          - visto['solo-1'].plantilla == '42'
+          - visto['stdin-1'] == visto['solo-1']
+        success_msg: "sin tty: aviso 'Not prompting', default aplicado, y el texto por stdin se ignoró."
+        fail_msg: "{{ sin_tty_runs.results[0].stderr }}\n{{ visto }}"
+
+    - name: "Veredicto 2 — sin terminal y sin default la variable es el TEXTO 'None'"
+      ansible.builtin.assert:
+        that:
+          - visto['solo-1'].sin_default == 'None'
+          - visto['solo-1'].tipo == 'str'
+          - not visto['solo-1'].es_none
+          - visto['solo-1'].definida
+          - visto['solo-1'].con_default_filtro == 'None'
+          - sin_tty_runs.results[0].rc == 0
+        success_msg: "sin_default = 'None' (str): is none False, defined True, default('X') no la salva, rc 0."
+        fail_msg: "{{ visto['solo-1'] | to_json }}"
+
+    - name: "Veredicto 3 — el prompt pisa a vars: del play, y -e pisa al prompt"
+      ansible.builtin.assert:
+        that:
+          - visto['solo-1'].pisada == 'del-prompt'
+          - visto['con_e-1'].pisada == 'desde-e'
+          - visto['con_e-1'].sin_default == 'desde-e'
+        success_msg: "vars: < vars_prompt < -e"
+        fail_msg: "{{ visto | to_json }}"
+
+    - name: "Veredicto 4 — la variable del prompt solo vive en su play; la de -e llega a todos"
+      ansible.builtin.assert:
+        that:
+          - visto['solo-2'].pisada == 'NO-DEFINIDA'
+          - visto['con_e-2'].pisada == 'desde-e'
+        success_msg: "segundo play: del prompt NO-DEFINIDA, de -e 'desde-e'."
+        fail_msg: "{{ visto | to_json }}"
+
+    - name: "Veredicto 5/6 — el default y lo TECLEADO se renderizan; unsafe lo deja literal"
+      ansible.builtin.assert:
+        that:
+          - tty_runs.results[0].stdout is search('DRIVER rc=0 contestadas=7/7')
+          - visto.tty.texto == '42'
+          - visto.tty.texto_unsafe == tecleado
+        success_msg: "tecleado '{{ '{{' }} 6 * 7 {{ '}}' }}': sin unsafe -> 42, con unsafe -> literal."
+        fail_msg: "{{ tty_runs.results[0].stdout }}\n{{ visto.tty }}"
+
+    - name: "Veredicto 7 — private no se ve, confirm repregunta si no coincide, encrypt guarda el hash"
+      ansible.builtin.assert:
+        that:
+          - tty_runs.results[0].stdout is search('VALUES ENTERED DO NOT MATCH')
+          - tty_runs.results[0].stdout is not search('s3creta')
+          - tty_runs.results[0].stdout is search('hola')
+          - visto.tty.clave == 's3creta'
+          - visto.tty.hash is match('[$]6[$]')
+          - visto.tty.hash != 'hola'
+        success_msg: "clave invisible y re-preguntada tras no coincidir; hash = {{ visto.tty.hash[:3] }}... (sha512_crypt)."
+        fail_msg: "{{ tty_runs.results[0].stdout }}\n{{ visto.tty }}"
+
+    - name: "Veredicto 8 — con terminal, -e evita esa pregunta y las demás se hacen"
+      ansible.builtin.assert:
+        that:
+          - tty_runs.results[1].stdout is search('DRIVER rc=0 contestadas=4/4')
+          - 'tty_runs.results[1].stdout is not search("(^|\n)texto: ")'
+          - visto.tty_e.texto == 'desde-e'
+          - visto.tty_e.texto_unsafe == 'literal'
+        success_msg: "-e texto=desde-e: sin pregunta para texto, las otras 4 respuestas consumidas."
+        fail_msg: "{{ tty_runs.results[1].stdout }}\n{{ visto.tty_e }}"
+
+    - name: Dejar la marca final para el CI (todas las escenas pasaron)
+      ansible.builtin.copy:
+        dest: "{{ dir_52 }}/TODAS-LAS-ESCENAS-OK"
+        content: "ok\n"
+        mode: "0644"
+      changed_when: false
