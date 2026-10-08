@@ -402,6 +402,14 @@ jobs:
           ansible-playbook playbooks/52_vars_prompt_a_fondo.yml
           test -f /tmp/ansible-lab-52/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
 
+      # Secciones y handlers: orden fijo pre_tasks/roles/tasks/post_tasks, roles+tasks
+      # son UNA sección para los vaciados, un handler re-notificado tras correr corre
+      # otra vez, y el notify a un handler inexistente solo revienta si la tarea cambia.
+      - name: "Playbook 53 — secciones del play y handlers (asserts incluidos)"
+        run: |
+          ansible-playbook playbooks/53_secciones_y_handlers.yml
+          test -f /tmp/ansible-lab-53/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \

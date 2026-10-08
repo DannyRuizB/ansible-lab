@@ -1,0 +1,296 @@
+# =============================================================================
+# Playbook 53 — secciones del play y handlers: cuándo corre de verdad cada cosa
+#
+# Un play tiene cuatro secciones de tareas (pre_tasks, roles, tasks,
+# post_tasks) y los handlers se vacían "al final". El 16 midió la letra
+# pequeña de notify dentro de UNA sección; este mide lo que pasa ENTRE
+# secciones y dentro de un vaciado, que es donde se esconden las sorpresas.
+# Cinco escenas, medidas contra ansible-core 2.21 antes de escribirlas, cada
+# una en un playbook interior que deja un registro de lo que corrió:
+#
+#   - Escena 1 (orden fijo): pre_tasks -> roles -> tasks -> post_tasks,
+#     SIEMPRE. El play interior las escribe al revés (post_tasks primero) y
+#     el registro sale en el orden de arriba: el orden del YAML no cuenta.
+#
+#   - Escena 2 (LA TRAMPA, vaciados implícitos): los handlers se vacían al
+#     final de pre_tasks, al final de roles+tasks (que son UNA sola sección,
+#     sin vaciado entre medias) y al final de post_tasks. Medido: un handler
+#     notificado en pre_tasks corre ANTES de los roles; uno notificado por el
+#     rol y otra vez por tasks corre UNA vez, después de tasks — el rol NO ve
+#     su handler corrido antes de que empiecen las tasks.
+#
+#   - Escena 3 (re-notificación en el mismo vaciado): los handlers corren en
+#     orden de DEFINICIÓN (el 16), y un handler puede notificar a otro. Con a,
+#     b, c definidos en ese orden, la tarea notifica [b, a], a notifica a c y
+#     b notifica a a: el registro es A B C A C. El dedupe del 16 vale mientras
+#     el handler está PENDIENTE; si lo vuelven a notificar después de correr,
+#     corre otra vez en el mismo vaciado. Notificar a uno definido ANTES
+#     también funciona (el último notifica al primero: ULTIMO PRIMERO).
+#
+#   - Escena 4 (LA OTRA TRAMPA, handler que no existe): `notify: no_existe`
+#     revienta el play (rc 1, "The requested handler 'no_existe' was not
+#     found") en cuanto la tarea CAMBIA — y la tarea siguiente ya no corre.
+#     Pero si la tarea NO cambia, rc 0 y ni un aviso; `--syntax-check` también
+#     pasa (y ansible-lint 26 tampoco lo marca, medido aparte). La errata
+#     duerme hasta el día que la tarea cambie, que suele ser el de producción.
+#
+#   - Escena 5 (un handler, tres vaciados): notificado en pre_tasks, tasks y
+#     post_tasks corre TRES veces — una por vaciado. El dedupe no cruza
+#     secciones.
+#
+# Regla de andar por casa: lo que tenga que estar reiniciado ANTES de los
+# roles se notifica en pre_tasks (o se fuerza con meta: flush_handlers); un
+# rol que necesita su handler a mitad lo vacía él; y cada `notify` se prueba
+# al menos una vez CON cambio, o la errata en el nombre no se ve nunca.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/53_secciones_y_handlers.yml
+# ...el CI lo ejecuta esperando rc 0 y comprobando la marca final.
+# =============================================================================
+
+- name: "Escenas de secciones y handlers medidas en playbooks interiores"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    dir_53: /tmp/ansible-lab-53
+    entorno_53:
+      ANSIBLE_VAULT_PASSWORD_FILE: /tmp/ansible-lab-53/vault_pass
+      ANSIBLE_ROLES_PATH: /tmp/ansible-lab-53/roles
+      ANSIBLE_NOCOLOR: "1"
+    # El rol interior: apunta que corrió y notifica al mismo handler que tasks.
+    rol_53: !unsafe |
+      - name: El rol notifica al handler compartido
+        ansible.builtin.command: "echo rol"
+        changed_when: true
+        notify: compartido
+      - name: El rol apunta que corrió
+        ansible.builtin.shell: "echo ROL >> {{ registro }}"
+        changed_when: false
+    # Escenas 1, 2 y 5: secciones escritas AL REVÉS, un handler por sección.
+    secciones: !unsafe |
+      - name: secciones al revés
+        hosts: localhost
+        gather_facts: false
+        post_tasks:
+          - name: post apunta
+            ansible.builtin.shell: "echo POST >> {{ registro }}"
+            changed_when: false
+          - name: post notifica
+            ansible.builtin.command: "echo x"
+            changed_when: true
+            notify: tres_veces
+        tasks:
+          - name: tasks apunta
+            ansible.builtin.shell: "echo TASKS >> {{ registro }}"
+            changed_when: false
+          - name: tasks notifica
+            ansible.builtin.command: "echo x"
+            changed_when: true
+            notify: [compartido, tres_veces]
+        roles:
+          - rol53
+        pre_tasks:
+          - name: pre apunta
+            ansible.builtin.shell: "echo PRE >> {{ registro }}"
+            changed_when: false
+          - name: pre notifica
+            ansible.builtin.command: "echo x"
+            changed_when: true
+            notify: [del_pre, tres_veces]
+          - name: pre apunta otra vez (el handler aún no ha corrido)
+            ansible.builtin.shell: "echo PRE-FIN >> {{ registro }}"
+            changed_when: false
+        handlers:
+          - name: del_pre
+            ansible.builtin.shell: "echo H-PRE >> {{ registro }}"
+            changed_when: false
+          - name: compartido
+            ansible.builtin.shell: "echo H-COMPARTIDO >> {{ registro }}"
+            changed_when: false
+          - name: tres_veces
+            ansible.builtin.shell: "echo H-TRES >> {{ registro }}"
+            changed_when: false
+    # Escena 3: handlers que se notifican entre sí.
+    cadena: !unsafe |
+      - name: cadena de handlers
+        hosts: localhost
+        gather_facts: false
+        tasks:
+          - name: notifica b y a (al revés de su definición)
+            ansible.builtin.command: "echo x"
+            changed_when: true
+            notify: [b, a]
+        handlers:
+          - name: a
+            ansible.builtin.shell: "echo A >> {{ registro }}"
+            changed_when: true
+            notify: c
+          - name: b
+            ansible.builtin.shell: "echo B >> {{ registro }}"
+            changed_when: true
+            notify: a
+          - name: c
+            ansible.builtin.shell: "echo C >> {{ registro }}"
+            changed_when: false
+    # Escena 3, segunda parte: un handler notifica a otro definido ANTES.
+    atras: !unsafe |
+      - name: notificar hacia atrás
+        hosts: localhost
+        gather_facts: false
+        tasks:
+          - name: notifica al último
+            ansible.builtin.command: "echo x"
+            changed_when: true
+            notify: ultimo
+        handlers:
+          - name: primero
+            ansible.builtin.shell: "echo PRIMERO >> {{ registro }}"
+            changed_when: false
+          - name: ultimo
+            ansible.builtin.shell: "echo ULTIMO >> {{ registro }}"
+            changed_when: true
+            notify: primero
+    # Escena 4: notify a un handler que no existe, con y sin cambio.
+    fantasma: !unsafe |
+      - name: handler fantasma
+        hosts: localhost
+        gather_facts: false
+        tasks:
+          - name: antes
+            ansible.builtin.shell: "echo ANTES >> {{ registro }}"
+            changed_when: false
+          - name: notifica a un handler que no existe
+            ansible.builtin.command: "echo x"
+            changed_when: "{{ cambia | bool }}"
+            notify: no_existe
+          - name: despues
+            ansible.builtin.shell: "echo DESPUES >> {{ registro }}"
+            changed_when: false
+        handlers:
+          - name: si_existe
+            ansible.builtin.debug:
+              msg: "nadie me llama"
+  tasks:
+    - name: Empezar con el directorio limpio
+      ansible.builtin.file:
+        path: "{{ dir_53 }}"
+        state: "{{ item }}"
+        mode: "0755"
+      loop: [absent, directory]
+      changed_when: false
+
+    - name: Crear el árbol del rol interior
+      ansible.builtin.file:
+        path: "{{ dir_53 }}/roles/rol53/tasks"
+        state: directory
+        mode: "0755"
+      changed_when: false
+
+    - name: Dejar un fichero de vault (sin uso) para el ansible anidado
+      ansible.builtin.copy:
+        content: "sin-uso\n"
+        dest: "{{ entorno_53.ANSIBLE_VAULT_PASSWORD_FILE }}"
+        mode: "0600"
+      changed_when: false
+
+    - name: Escribir los interiores y el rol
+      ansible.builtin.copy:
+        content: "{{ item.content }}"
+        dest: "{{ dir_53 }}/{{ item.file }}"
+        mode: "0644"
+      loop:
+        - { file: roles/rol53/tasks/main.yml, content: "{{ rol_53 }}" }
+        - { file: secciones.yml, content: "{{ secciones }}" }
+        - { file: cadena.yml, content: "{{ cadena }}" }
+        - { file: atras.yml, content: "{{ atras }}" }
+        - { file: fantasma.yml, content: "{{ fantasma }}" }
+      loop_control:
+        label: "{{ item.file }}"
+      changed_when: false
+
+    - name: Correr cada interior (el fantasma dos veces, con y sin cambio)
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook -i localhost, -c local {{ dir_53 }}/{{ item.file }}
+          -e registro={{ dir_53 }}/{{ item.id }}.log -e ansible_python_interpreter={{ ansible_playbook_python }} {{ item.extra }}
+      loop:
+        - { id: secciones, file: secciones.yml, extra: "" }
+        - { id: cadena, file: cadena.yml, extra: "" }
+        - { id: atras, file: atras.yml, extra: "" }
+        - { id: fantasma_cambia, file: fantasma.yml, extra: "-e cambia=true" }
+        - { id: fantasma_quieto, file: fantasma.yml, extra: "-e cambia=false" }
+      loop_control:
+        label: "{{ item.id }}"
+      register: corridas
+      failed_when: false
+      changed_when: false
+      environment: "{{ entorno_53 }}"
+
+    - name: Pasar el fantasma por --syntax-check
+      ansible.builtin.command:
+        cmd: "ansible-playbook -i localhost, {{ dir_53 }}/fantasma.yml --syntax-check"
+      register: sintaxis
+      failed_when: false
+      changed_when: false
+      environment: "{{ entorno_53 }}"
+
+    - name: Leer los registros
+      ansible.builtin.set_fact:
+        visto: >-
+          {{ visto | default({}) | combine({item: (lookup('ansible.builtin.file', dir_53 ~ '/' ~ item ~ '.log', errors='ignore')
+             | default('', true)).splitlines()}) }}
+        rc: "{{ dict(corridas.results | map(attribute='item.id') | zip(corridas.results | map(attribute='rc'))) }}"
+      loop: [secciones, cadena, atras, fantasma_cambia, fantasma_quieto]
+
+    - name: "Veredicto 1 — las secciones corren en orden fijo, no en el del YAML"
+      ansible.builtin.assert:
+        that:
+          - rc.secciones == 0
+          - visto.secciones | select('in', ['PRE', 'ROL', 'TASKS', 'POST']) | list == ['PRE', 'ROL', 'TASKS', 'POST']
+        success_msg: "escritas post/tasks/roles/pre, corrieron pre -> roles -> tasks -> post"
+        fail_msg: "{{ visto.secciones | to_json }} (rc {{ rc.secciones }})"
+
+    - name: "Veredicto 2 — vaciado tras pre_tasks, roles+tasks son UNA sección"
+      ansible.builtin.assert:
+        that:
+          - visto.secciones == ['PRE', 'PRE-FIN', 'H-PRE', 'H-TRES', 'ROL', 'TASKS', 'H-COMPARTIDO', 'H-TRES', 'POST', 'H-TRES']
+          - visto.secciones | select('equalto', 'H-COMPARTIDO') | list | length == 1
+        success_msg: "H-PRE antes del rol; H-COMPARTIDO (rol + tasks) una sola vez, después de TASKS"
+        fail_msg: "{{ visto.secciones | to_json }}"
+
+    - name: "Veredicto 3 — re-notificado tras correr, corre otra vez en el mismo vaciado"
+      ansible.builtin.assert:
+        that:
+          - rc.cadena == 0
+          - visto.cadena == ['A', 'B', 'C', 'A', 'C']
+          - rc.atras == 0
+          - visto.atras == ['ULTIMO', 'PRIMERO']
+        success_msg: "definición a,b,c + notify [b,a] = A B C A C; notificar a uno definido antes funciona"
+        fail_msg: "cadena {{ visto.cadena | to_json }} / atras {{ visto.atras | to_json }}"
+
+    - name: "Veredicto 4 — el handler que no existe solo revienta si la tarea cambia"
+      ansible.builtin.assert:
+        that:
+          - rc.fantasma_cambia != 0
+          - corridas.results[3].stderr is search("The requested handler 'no_existe' was not found")
+          - visto.fantasma_cambia == ['ANTES']
+          - rc.fantasma_quieto == 0
+          - visto.fantasma_quieto == ['ANTES', 'DESPUES']
+          - corridas.results[4].stderr is not search('no_existe')
+          - sintaxis.rc == 0
+        success_msg: "con cambio: rc {{ rc.fantasma_cambia }} y la tarea siguiente no corre; sin cambio: rc 0, sin aviso; --syntax-check pasa"
+        fail_msg: "{{ rc | to_json }} {{ visto.fantasma_cambia | to_json }} {{ visto.fantasma_quieto | to_json }} {{ corridas.results[3].stderr }}"
+
+    - name: "Veredicto 5 — un handler notificado en tres secciones corre tres veces"
+      ansible.builtin.assert:
+        that:
+          - visto.secciones | select('equalto', 'H-TRES') | list | length == 3
+        success_msg: "H-TRES x3: el dedupe no cruza secciones"
+        fail_msg: "{{ visto.secciones | to_json }}"
+
+    - name: Dejar la marca final
+      ansible.builtin.copy:
+        content: "ok\n"
+        dest: "{{ dir_53 }}/TODAS-LAS-ESCENAS-OK"
+        mode: "0644"
+      changed_when: false
