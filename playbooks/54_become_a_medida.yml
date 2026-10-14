@@ -1,0 +1,404 @@
+# =============================================================================
+# Playbook 54 — Become plugin a medida: la undécima extensión — LA IDENTIDAD
+#
+# `become: true` no es magia: Ansible le pasa el comando a un become plugin
+# (sudo, su, doas...) y ejecuta LO QUE EL PLUGIN DEVUELVE. Este playbook
+# escribe uno, `become_plugins/lab_testigo.py`, que envuelve el comando con
+# `env LAB_TESTIGO_USER=<usuario>` sin escalar de verdad (el laboratorio corre
+# sin permisos de administrador), y con él mide cinco cosas contra
+# ansible-core 2.21. Cada escena es un playbook interior; el exterior lo
+# corre, captura lo que pasó y lo compara:
+#
+#   - Escena 1 (sin `become: true` no hay become): `become_user` y
+#     `become_method` solos no hacen NADA. El plugin ni se llama.
+#
+#   - Escena 2 (el envoltorio): con -vvv se ve la línea que de verdad se
+#     ejecuta: `env LAB_TESTIGO_USER=ana /bin/sh -c 'echo BECOME-SUCCESS-<id> ;
+#     ...'`. Y pedir become al MISMO usuario con el que ya se corre no llama
+#     al plugin: Ansible se lo salta.
+#
+#   - Escena 3 (la clave va por el prompt): el plugin imprime un prompt,
+#     Ansible lo ve y escribe `ansible_become_password` por la entrada
+#     estándar. Con -vvv la clave NO aparece en ninguna línea. Con la clave
+#     mala: "Premature end of stream waiting for become success" y, debajo,
+#     lo que imprimió el envoltorio ("lab_testigo: clave incorrecta").
+#
+#   - Escena 4 (LA TRAMPA, precedencia de become_user): el keyword
+#     `become_user:` del play/tarea es lo que MENOS manda. Lo pisa una
+#     variable de inventario (`ansible_become_user` en el host), una variable
+#     de la tarea y `-e`. Y la variable propia del plugin
+#     (`ansible_lab_testigo_user`) pisa a `ansible_become_user`... incluso a
+#     la de `-e`: entre las variables de un plugin gana la que su
+#     documentación declara la última.
+#
+#   - Escena 5 (LA OTRA TRAMPA, become a un usuario sin privilegios): sin
+#     pipelining, Ansible copia el módulo a un fichero temporal y tiene que
+#     dárselo a leer al otro usuario: setfacl, chown, chmod +a... En una
+#     máquina sin ACLs (aquí se simulan con un `setfacl` que falla) no puede,
+#     y la tarea muere. `allow_world_readable_tmpfiles` la "arregla" haciendo
+#     el fichero legible POR TODOS, y ese fichero lleva los argumentos del
+#     módulo EN CLARO: un `stdin` con una clave se lee con un `grep`. `no_log`
+#     no lo tapa. Lo que sí lo arregla es pipelining: el módulo va por la
+#     entrada estándar y no hay fichero. Ojo: ANSIBLE_KEEP_REMOTE_FILES (el
+#     interruptor de depurar) APAGA el pipelining y vuelve a crear el fichero.
+#     (Esta escena mide el camino de un usuario normal; como root Ansible
+#     hace chown y no aplica, así que se salta.)
+#
+# Regla de andar por casa: become siempre con `become: true` explícito; el
+# become_user en un solo sitio (el keyword pierde contra el inventario); y
+# para escalar a un usuario sin privilegios, pipelining o ACLs, nunca
+# `allow_world_readable_tmpfiles`.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/54_become_a_medida.yml
+# ...el CI lo ejecuta esperando rc 0 y comprobando la marca final.
+# =============================================================================
+
+- name: "Escenas del become plugin a medida, medidas en playbooks interiores"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    dir_54: /tmp/ansible-lab-54
+    yo_54: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+    soy_root_54: "{{ lookup('ansible.builtin.pipe', 'id -u') == '0' }}"
+    clave_54: "s3creta-54"
+    secreto_54: "clave-del-modulo-54"
+    entorno_54:
+      ANSIBLE_BECOME_PLUGINS: "{{ playbook_dir }}/../become_plugins"
+      ANSIBLE_VAULT_PASSWORD_FILE: /tmp/ansible-lab-54/vault_pass
+      ANSIBLE_NOCOLOR: "1"
+      ANSIBLE_PIPELINING: "1"
+      ANSIBLE_LOCAL_BECOME_SUCCESS_TIMEOUT: "10"
+    base_54: >-
+      ansible-playbook -i localhost, -c local
+      -e ansible_python_interpreter={{ ansible_playbook_python }}
+      -e dir={{ dir_54 }}
+    # Escenas 1-2: lo que ve el módulo con y sin `become: true`, y pidiendo
+    # become al propio usuario.
+    uno: !unsafe |
+      - name: uno
+        hosts: localhost
+        gather_facts: false
+        tasks:
+          - name: become_user y become_method SIN become true
+            ansible.builtin.command: printenv LAB_TESTIGO_USER
+            become_method: lab_testigo
+            become_user: ana
+            register: sin
+            changed_when: false
+            failed_when: false
+          - name: con become true
+            ansible.builtin.command: printenv LAB_TESTIGO_USER
+            become: true
+            become_method: lab_testigo
+            become_user: ana
+            register: con
+            changed_when: false
+          - name: become al mismo usuario con el que ya se corre
+            ansible.builtin.command: printenv LAB_TESTIGO_USER
+            become: true
+            become_method: lab_testigo
+            become_user: "{{ yo }}"
+            register: mismo
+            changed_when: false
+            failed_when: false
+          - name: Guardar lo visto
+            ansible.builtin.copy:
+              dest: "{{ dir }}/uno.json"
+              mode: "0644"
+              content: "{{ {'sin_rc': sin.rc, 'sin': sin.stdout, 'con': con.stdout,
+                            'mismo_rc': mismo.rc, 'mismo': mismo.stdout} | to_json }}"
+    # Escena 3: una tarea con la clave pedida por prompt.
+    tres: !unsafe |
+      - name: tres
+        hosts: localhost
+        gather_facts: false
+        tasks:
+          - name: con clave
+            ansible.builtin.command: printenv LAB_TESTIGO_USER
+            become: true
+            become_method: lab_testigo
+            become_user: ana
+            register: r
+            changed_when: false
+          - name: Guardar lo visto
+            ansible.builtin.copy:
+              dest: "{{ dir }}/tres.json"
+              mode: "0644"
+              content: "{{ {'usuario': r.stdout} | to_json }}"
+    # Escena 4: el mismo become_user pedido desde cinco sitios.
+    cuatro: !unsafe |
+      - name: cuatro
+        hosts: localhost
+        gather_facts: false
+        become: true
+        become_method: lab_testigo
+        tasks:
+          - name: solo el keyword
+            ansible.builtin.command: printenv LAB_TESTIGO_USER
+            become_user: ana
+            register: k
+            changed_when: false
+          - name: keyword + ansible_become_user en la tarea
+            ansible.builtin.command: printenv LAB_TESTIGO_USER
+            become_user: ana
+            vars:
+              ansible_become_user: berta
+            register: kv
+            changed_when: false
+          - name: keyword + la variable propia del plugin
+            ansible.builtin.command: printenv LAB_TESTIGO_USER
+            become_user: ana
+            vars:
+              ansible_lab_testigo_user: carla
+            register: kp
+            changed_when: false
+          - name: sin nada (el default del plugin)
+            ansible.builtin.command: printenv LAB_TESTIGO_USER
+            register: d
+            changed_when: false
+          - name: Guardar lo visto
+            ansible.builtin.copy:
+              dest: "{{ dir }}/cuatro-{{ id }}.json"
+              mode: "0644"
+              content: "{{ {'k': k.stdout, 'kv': kv.stdout, 'kp': kp.stdout, 'd': d.stdout} | to_json }}"
+            become: false
+    # Escena 5: un módulo con un secreto en sus argumentos, ejecutado con
+    # become a `nobody`.
+    cinco: !unsafe |
+      - name: cinco
+        hosts: localhost
+        gather_facts: false
+        tasks:
+          - name: un secreto en los argumentos del modulo
+            ansible.builtin.command:
+              cmd: cat
+              stdin: "{{ secreto }}"
+            become: true
+            become_method: lab_testigo
+            become_user: nobody
+            no_log: "{{ con_no_log | default(false) | bool }}"
+            changed_when: false
+  tasks:
+    - name: Empezar con el directorio limpio
+      ansible.builtin.file:
+        path: "{{ dir_54 }}"
+        state: "{{ item }}"
+        mode: "0755"
+      loop: [absent, directory]
+      changed_when: false
+
+    - name: Crear los subdirectorios (temporales de la escena 5 y el falso setfacl)
+      ansible.builtin.file:
+        path: "{{ dir_54 }}/{{ item }}"
+        state: directory
+        mode: "0755"
+      loop: [sys, sin_acl]
+      changed_when: false
+
+    - name: Escribir los interiores, la clave esperada y el inventario de la escena 4
+      ansible.builtin.copy:
+        content: "{{ item.content }}"
+        dest: "{{ dir_54 }}/{{ item.file }}"
+        mode: "{{ item.mode | default('0644') }}"
+      loop:
+        - { file: uno.yml, content: "{{ uno }}" }
+        - { file: tres.yml, content: "{{ tres }}" }
+        - { file: cuatro.yml, content: "{{ cuatro }}" }
+        - { file: cinco.yml, content: "{{ cinco }}" }
+        - { file: clave_esperada, content: "{{ clave_54 }}\n", mode: "0600" }
+        - { file: vault_pass, content: "sin-uso\n", mode: "0600" }
+        - { file: inventario_host_var, content: "localhost ansible_connection=local ansible_become_user=berta2\n" }
+        # Una máquina sin ACLs: setfacl existe pero falla (como en un sistema
+        # de ficheros montado sin acl o un contenedor mínimo).
+        - { file: sin_acl/setfacl, content: "#!/bin/sh\necho 'setfacl: sin ACLs (laboratorio 54)' >&2\nexit 1\n", mode: "0755" }
+      loop_control:
+        label: "{{ item.file }}"
+      changed_when: false
+
+    # ---- Escenas 1 y 2 -------------------------------------------------------
+    - name: "Escenas 1-2 — correr el interior con -vvv"
+      ansible.builtin.command:
+        cmd: "{{ base_54 }} -e yo={{ yo_54 }} -vvv {{ dir_54 }}/uno.yml"
+        chdir: "{{ dir_54 }}"
+      register: run_uno
+      changed_when: false
+      environment: "{{ entorno_54 }}"
+
+    # ---- Escena 3 ------------------------------------------------------------
+    - name: "Escena 3 — la clave buena y la mala, con -vvv"
+      ansible.builtin.command:
+        cmd: >-
+          {{ base_54 }} -vvv {{ dir_54 }}/tres.yml
+          -e lab_testigo_clave_fichero={{ dir_54 }}/clave_esperada
+          -e ansible_become_password={{ item }}
+        chdir: "{{ dir_54 }}"
+      loop: ["{{ clave_54 }}", "mala-54"]
+      register: run_tres
+      changed_when: false
+      failed_when: false
+      environment: "{{ entorno_54 }}"
+
+    # ---- Escena 4 ------------------------------------------------------------
+    - name: "Escena 4 — el mismo become_user desde varios sitios"
+      ansible.builtin.command:
+        cmd: "{{ item.cmd }} -e id={{ item.id }} {{ dir_54 }}/cuatro.yml"
+        chdir: "{{ dir_54 }}"
+      loop:
+        - { id: base, cmd: "{{ base_54 }}" }
+        - { id: inventario, cmd: "{{ base_54 | replace('-i localhost,', '-i ' ~ dir_54 ~ '/inventario_host_var') }}" }
+        - { id: extra, cmd: "{{ base_54 }} -e ansible_become_user=dani" }
+      loop_control:
+        label: "{{ item.id }}"
+      changed_when: false
+      environment: "{{ entorno_54 }}"
+
+    # ---- Escena 5 ------------------------------------------------------------
+    # Sin pipelining y sin ACLs; los temporales del become van a dir_54/sys
+    # (ansible_system_tmpdirs) para poder mirarlos después.
+    - name: "Escena 5 — become a nobody sin pipelining ni ACLs, de cuatro maneras"
+      ansible.builtin.command:
+        cmd: >-
+          {{ base_54 }} {{ dir_54 }}/cinco.yml -e secreto={{ secreto_54 }}
+          -e '{"ansible_system_tmpdirs": ["{{ dir_54 }}/sys/{{ item.id }}"]}' {{ item.extra | default('') }}
+        chdir: "{{ dir_54 }}"
+      loop:
+        - { id: tal_cual, env: { ANSIBLE_PIPELINING: "0" } }
+        - { id: legible, env: { ANSIBLE_PIPELINING: "0", ANSIBLE_SHELL_ALLOW_WORLD_READABLE_TEMP: "1", ANSIBLE_KEEP_REMOTE_FILES: "1" } }
+        - { id: legible_nolog, env: { ANSIBLE_PIPELINING: "0", ANSIBLE_SHELL_ALLOW_WORLD_READABLE_TEMP: "1", ANSIBLE_KEEP_REMOTE_FILES: "1" },
+            extra: "-e con_no_log=true" }
+        - { id: pipelining, env: { ANSIBLE_PIPELINING: "1" } }
+        - { id: pipelining_keep, env: { ANSIBLE_PIPELINING: "1", ANSIBLE_KEEP_REMOTE_FILES: "1" } }
+      loop_control:
+        label: "{{ item.id }}"
+      register: run_cinco
+      changed_when: false
+      failed_when: false
+      when: not soy_root_54 | bool
+      environment: "{{ entorno_54 | combine(item.env, {'PATH': dir_54 ~ '/sin_acl:' ~ lookup('ansible.builtin.env', 'PATH')}) }}"
+
+    - name: "Escena 5 — buscar los módulos que quedaron en disco y el secreto dentro"
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          printf '{'
+          sep=''
+          for d in legible legible_nolog pipelining; do
+            f=$(find "sys/$d" -name 'AnsiballZ_*.py' 2>/dev/null | head -1)
+            if [ -n "$f" ]; then modo=$(stat -c %a "$f"); n=$(grep -c '{{ secreto_54 }}' "$f" || true)
+            else modo=sin-fichero; n=0; fi
+            printf '%s"%s": {"modo": "%s", "secreto": %s}' "$sep" "$d" "$modo" "$n"
+            sep=', '
+          done
+          printf '}\n'
+        chdir: "{{ dir_54 }}"
+        executable: /bin/bash
+      register: ficheros_cinco
+      changed_when: false
+      when: not soy_root_54 | bool
+
+    - name: Leer lo que vieron las escenas 1-4
+      ansible.builtin.set_fact:
+        visto_uno: "{{ lookup('ansible.builtin.file', dir_54 ~ '/uno.json') | from_json }}"
+        visto_tres: "{{ lookup('ansible.builtin.file', dir_54 ~ '/tres.json') | from_json }}"
+        visto_cuatro:
+          base: "{{ lookup('ansible.builtin.file', dir_54 ~ '/cuatro-base.json') | from_json }}"
+          inventario: "{{ lookup('ansible.builtin.file', dir_54 ~ '/cuatro-inventario.json') | from_json }}"
+          extra: "{{ lookup('ansible.builtin.file', dir_54 ~ '/cuatro-extra.json') | from_json }}"
+
+    - name: "Veredicto 1 — sin `become: true`, become_user y become_method no hacen nada"
+      ansible.builtin.assert:
+        that:
+          - visto_uno.sin_rc == 1
+          - visto_uno.sin == ''
+          - visto_uno.con == 'ana'
+        success_msg: "sin become: LAB_TESTIGO_USER no existe (rc 1); con become: 'ana'"
+        fail_msg: "{{ visto_uno | to_json }}"
+
+    - name: "Veredicto 2 — la línea que se ejecuta es la del plugin; become a uno mismo ni se llama"
+      ansible.builtin.assert:
+        that:
+          - run_uno.stdout is search("EXEC .*env LAB_TESTIGO_USER=ana /bin/sh -c .*echo BECOME-SUCCESS-[a-z]{32} ;")
+          - visto_uno.mismo_rc == 1
+          - visto_uno.mismo == ''
+        success_msg: "-vvv: EXEC ... env LAB_TESTIGO_USER=ana ... BECOME-SUCCESS-<id>; become_user={{ yo_54 }} (uno mismo): sin envoltorio"
+        fail_msg: "{{ visto_uno | to_json }} {{ run_uno.stdout_lines | select('search', 'EXEC') | list | to_json }}"
+
+    - name: "Veredicto 3 — la clave va por el prompt, nunca por la línea de comandos"
+      ansible.builtin.assert:
+        that:
+          - run_tres.results[0].rc == 0
+          - visto_tres.usuario == 'ana'
+          - (run_tres.results[0].stdout ~ run_tres.results[0].stderr) is not search(clave_54)
+          - run_tres.results[1].rc != 0
+          - (run_tres.results[1].stdout ~ run_tres.results[1].stderr) is search('Premature end of stream waiting for become success')
+          - "(run_tres.results[1].stdout ~ run_tres.results[1].stderr) is search('lab_testigo: clave incorrecta')"
+          - (run_tres.results[1].stdout ~ run_tres.results[1].stderr) is not search('mala-54')
+        success_msg: "clave buena: 'ana' y la clave en ninguna línea de -vvv; clave mala: rc {{ run_tres.results[1].rc }}, 'clave incorrecta', tampoco se ve"
+        fail_msg: "{{ run_tres.results | map(attribute='rc') | list }} {{ run_tres.results[1].stdout_lines | select('search', 'fatal|clave') | list | to_json }}"
+
+    - name: "Veredicto 4 — el keyword become_user es lo que menos manda"
+      ansible.builtin.assert:
+        that:
+          # Solo el keyword: manda el keyword. Sin nada: el default del plugin.
+          - visto_cuatro.base.k == 'ana'
+          - visto_cuatro.base.d == 'root'
+          # Una variable de la tarea pisa al keyword de la misma tarea.
+          - visto_cuatro.base.kv == 'berta'
+          # LA TRAMPA: una variable de inventario pisa al keyword del play...
+          - visto_cuatro.inventario.k == 'berta2'
+          - visto_cuatro.inventario.d == 'berta2'
+          # ...aunque la de la tarea la sigue pisando a ella.
+          - visto_cuatro.inventario.kv == 'berta'
+          # -e pisa a todo lo genérico...
+          - visto_cuatro.extra.k == 'dani'
+          - visto_cuatro.extra.kv == 'dani'
+          # ...pero no a la variable propia del plugin.
+          - visto_cuatro.base.kp == 'carla'
+          - visto_cuatro.extra.kp == 'carla'
+        success_msg: "keyword < inventario < vars de tarea < -e; y ansible_lab_testigo_user gana a ansible_become_user, incluso a la de -e"
+        fail_msg: "{{ visto_cuatro | to_json }}"
+
+    - name: "Veredicto 5 — un become sin privilegios, sin ACLs ni pipelining, enseña los argumentos a todos"
+      vars:
+        r: "{{ dict(run_cinco.results | map(attribute='item.id') | zip(run_cinco.results | map(attribute='rc'))) }}"
+        o: "{{ dict(run_cinco.results | map(attribute='item.id') | zip(run_cinco.results | map(attribute='stdout') | zip(run_cinco.results | map(attribute='stderr')) | map('join', '\n'))) }}"
+        f: "{{ ficheros_cinco.stdout | from_json }}"
+      ansible.builtin.assert:
+        that:
+          # Tal cual: sin ACLs, la tarea muere.
+          - r.tal_cual != 0
+          - o.tal_cual is search('Failed to set permissions on the temporary files')
+          # allow_world_readable_tmpfiles: pasa, con aviso...
+          - r.legible == 0
+          - o.legible is search('Using world-readable permissions for temporary files')
+          # ...y el módulo queda legible por todos con el secreto en claro.
+          - f.legible.modo[-1] in ['4', '5', '6', '7']
+          - f.legible.secreto >= 1
+          # no_log no lo tapa: el fichero es el mismo.
+          - r.legible_nolog == 0
+          - f.legible_nolog.secreto >= 1
+          # Pipelining: sin fichero, sin aviso, sin trampa.
+          - r.pipelining == 0
+          - o.pipelining is not search('world-readable')
+          - f.pipelining.modo == 'sin-fichero'
+          # KEEP_REMOTE_FILES apaga el pipelining: vuelve el fichero y la muerte.
+          - r.pipelining_keep != 0
+          - o.pipelining_keep is search('Failed to set permissions on the temporary files')
+        success_msg: >-
+          sin ACLs: muere; legible por todos: modo {{ f.legible.modo }} con el secreto dentro (también con no_log);
+          con pipelining: ni fichero ni aviso; con KEEP_REMOTE_FILES el pipelining se apaga y vuelve a morir
+        fail_msg: "{{ f | to_json }} {{ r | to_json }}"
+      when: not soy_root_54 | bool
+
+    - name: "Escena 5 — saltada: como root Ansible hace chown y la escena no aplica"
+      ansible.builtin.debug:
+        msg: "Corriendo como root: la escena 5 mide el camino de un usuario normal (el del CI y el WSL)."
+      when: soy_root_54 | bool
+
+    - name: Dejar la marca final
+      ansible.builtin.copy:
+        content: "ok\n"
+        dest: "{{ dir_54 }}/TODAS-LAS-ESCENAS-OK"
+        mode: "0644"
+      changed_when: false
