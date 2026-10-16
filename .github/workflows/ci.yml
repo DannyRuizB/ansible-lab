@@ -410,6 +410,14 @@ jobs:
           ansible-playbook playbooks/53_secciones_y_handlers.yml
           test -f /tmp/ansible-lab-53/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
 
+      # validate y backup: %s es una copia en el tmp de Ansible (no el destino), el
+      # comando va sin shell y se formatea con %, --check no valida, y backup deja
+      # copia aunque la validación falle.
+      - name: "Playbook 54 — validate y backup (asserts incluidos)"
+        run: |
+          ansible-playbook playbooks/54_validate_y_backup.yml
+          test -f /tmp/ansible-lab-54/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \
