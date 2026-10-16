@@ -418,6 +418,13 @@ jobs:
           ansible-playbook playbooks/54_validate_y_backup.yml
           test -f /tmp/ansible-lab-54/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
 
+      # --start-at-task: se salta roles, register, handlers, plays y pre_tasks
+      # anteriores; los facts no; y un nombre que no casa no corre nada con rc 0.
+      - name: "Playbook 55 — --start-at-task (asserts incluidos)"
+        run: |
+          ansible-playbook playbooks/55_start_at_task.yml
+          test -f /tmp/ansible-lab-55/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \
