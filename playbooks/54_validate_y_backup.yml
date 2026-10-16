@@ -1,0 +1,383 @@
+# =============================================================================
+# Playbook 54 — validate y backup: escribir un fichero de configuración sin
+# dejar uno roto (y sin fiarse de lo que parece que hacen)
+#
+# `validate:` (copy, template, lineinfile, blockinfile...) ejecuta un comando
+# sobre el contenido NUEVO antes de ponerlo en su sitio: si el comando sale
+# con error, el destino no se toca. Es lo que se usa con `visudo -cf %s`,
+# `sshd -t -f %s` o `nginx -t -c %s` — la diferencia entre un sudoers roto
+# (nadie puede hacer sudo para arreglarlo) y una tarea en rojo. `backup:`
+# guarda el fichero anterior. Siete escenas, medidas contra ansible-core 2.21
+# antes de escribirlas, con un validador de JSON en python3 para no depender
+# de nada instalado:
+#
+#   - Escena 1 (lo que promete): contenido válido -> escrito; inválido ->
+#     "failed to validate" y el destino queda IGUAL byte a byte (mismo
+#     checksum), sin restos en su directorio.
+#
+#   - Escena 2 (qué es %s): NO es el destino. Es una copia temporal en el tmp
+#     de Ansible (`~/.ansible/tmp/ansible-tmp-.../.source.json`), en otro
+#     directorio. Un validador que resuelva rutas RELATIVAS al fichero las
+#     busca al lado de la copia: aquí un hermano que existe junto al destino
+#     "no está", y `nginx -t -c %s` con `include sitio.conf;` falla igual
+#     (medido aparte en nginx:alpine: open() ".../tmp/sitio.conf" failed).
+#     sshd no cae: su `Include` relativo es siempre relativo a /etc/ssh.
+#
+#   - Escena 3 (LA TRAMPA, no hay shell): el comando se trocea como argv y se
+#     ejecuta sin shell. `true %s && false` VALIDA (el `&&` y el `false` son
+#     argumentos de `true`), y `echo %s > fichero` no crea ningún fichero.
+#     Lo que se escribiría pensando en sh hay que envolverlo en `sh -c`.
+#
+#   - Escena 4 (un solo %s, y nada más con %): el comando se formatea con el
+#     operador % de Python y UN argumento. Dos %s -> "not enough arguments
+#     for format string"; `grep -q 100% %s` -> "unsupported format character";
+#     y sin %s -> "validate must contain %s". Receta: `sh -c '...' %s` y usar
+#     "$0" dentro tantas veces como haga falta; un % literal se escribe %%.
+#     De propina, una trampa que rompió la primera versión de esta escena:
+#     los dos primeros errores son EXCEPCIONES del módulo, y con
+#     `failed_when: false` ansible-core 2.21 las suprime SIN `msg` (solo
+#     queda `failed_when_suppressed_exception`); con `ignore_errors: true` el
+#     mensaje se conserva. Para inspeccionar un fallo, ignore_errors.
+#
+#   - Escena 5 (backup): `dest.PID.AAAA-MM-DD@HH:MM:SS~` junto al destino, y
+#     solo cuando hay cambio (una segunda pasada idéntica no crea otro).
+#
+#   - Escena 6 (LA OTRA TRAMPA): con `backup: true`, una validación FALLIDA
+#     deja igualmente una copia de seguridad — se hace ANTES de validar — y
+#     el resultado de la tarea no la menciona (no hay `backup_file`). Medido
+#     en copy y en lineinfile: cada intento fallido, una copia huérfana más.
+#
+#   - Escena 7 (--check no valida): en check mode el contenido inválido sale
+#     `changed` y sin error. El ensayo dice "lo cambiaría" a un fichero que la
+#     pasada real va a rechazar. Y lineinfile valida el fichero ENTERO
+#     resultante, no la línea que añade: `{"nuevo": true}` es JSON válido
+#     por sí sola y aun así se rechaza, porque detrás de otro objeto no lo es.
+#
+# Regla de andar por casa: todo fichero que pueda dejar una máquina sin
+# acceso lleva `validate:`; el comando se escribe pensando en argv (o con
+# `sh -c '...' %s`); los includes se validan en su contexto real; y si se usa
+# `backup:`, las copias se limpian contando con los intentos fallidos.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/54_validate_y_backup.yml
+# ...el CI lo ejecuta esperando rc 0 y comprobando la marca final.
+# =============================================================================
+
+- name: "Escenas de validate y backup medidas una a una"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    dir_54: /tmp/ansible-lab-54
+    # Valida JSON con python3: lo que haya en %s tiene que parsear.
+    valida_json: "python3 -c 'import json,sys; json.load(open(sys.argv[1]))' %s"
+    patron_backup: '^conf\.json\.[0-9]+\.[0-9]{4}-[0-9]{2}-[0-9]{2}@[0-9]{2}:[0-9]{2}:[0-9]{2}~$'
+
+  tasks:
+    - name: Empezar de cero
+      ansible.builtin.file:
+        path: "{{ dir_54 }}"
+        state: absent
+
+    - name: Crear el directorio de trabajo
+      ansible.builtin.file:
+        path: "{{ dir_54 }}"
+        state: directory
+        mode: "0755"
+
+    # --- Escena 1: lo que promete ---------------------------------------------
+    - name: "Escena 1 — un JSON válido pasa y se escribe"
+      ansible.builtin.copy:
+        dest: "{{ dir_54 }}/conf.json"
+        content: '{"puerto": 8080}'
+        mode: "0644"
+        validate: "{{ valida_json }}"
+      register: e1_valido
+
+    - name: "Escena 1 — checksum antes del intento roto"
+      ansible.builtin.stat:
+        path: "{{ dir_54 }}/conf.json"
+      register: e1_antes
+
+    - name: "Escena 1 — un JSON roto se rechaza"
+      ansible.builtin.copy:
+        dest: "{{ dir_54 }}/conf.json"
+        content: '{"puerto": 8080,}'
+        mode: "0644"
+        validate: "{{ valida_json }}"
+      register: e1_roto
+      failed_when: false
+
+    - name: "Escena 1 — checksum después"
+      ansible.builtin.stat:
+        path: "{{ dir_54 }}/conf.json"
+      register: e1_despues
+
+    - name: "Escena 1 — qué hay en el directorio"
+      ansible.builtin.find:
+        paths: "{{ dir_54 }}"
+        hidden: true
+      register: e1_restos
+
+    - name: "Escena 1 — veredicto"
+      ansible.builtin.assert:
+        that:
+          - e1_valido is changed
+          - e1_roto.msg is search('failed to validate')
+          - e1_antes.stat.checksum == e1_despues.stat.checksum
+          - e1_restos.files | map(attribute='path') | list == [dir_54 ~ '/conf.json']
+        success_msg: "Escena 1 OK: lo inválido no toca el destino ni deja restos"
+
+    # --- Escena 2: qué es %s ----------------------------------------------------
+    - name: "Escena 2 — el validador apunta qué fichero le pasan"
+      ansible.builtin.copy:
+        dest: "{{ dir_54 }}/otro.json"
+        content: '{"a": 1}'
+        mode: "0644"
+        validate: "sh -c 'echo \"$0\" > {{ dir_54 }}/argumento' %s"
+
+    - name: "Escena 2 — leer lo que recibió"
+      ansible.builtin.slurp:
+        src: "{{ dir_54 }}/argumento"
+      register: e2_arg
+
+    - name: "Escena 2 — un fichero hermano junto al destino"
+      ansible.builtin.copy:
+        dest: "{{ dir_54 }}/incluido.json"
+        content: '{"b": 2}'
+        mode: "0644"
+
+    - name: "Escena 2 — un validador que busca el hermano al lado de %s"
+      ansible.builtin.copy:
+        dest: "{{ dir_54 }}/otro.json"
+        content: '{"a": 2}'
+        mode: "0644"
+        validate: "sh -c 'test -f \"$(dirname \"$0\")/incluido.json\"' %s"
+      register: e2_hermano
+      failed_when: false
+
+    - name: "Escena 2 — veredicto"
+      vars:
+        ruta_validada: "{{ e2_arg.content | b64decode | trim }}"
+      ansible.builtin.assert:
+        that:
+          - ruta_validada != dir_54 ~ '/otro.json'
+          - (ruta_validada | dirname) != dir_54
+          - "'ansible-tmp-' in ruta_validada"
+          - e2_hermano.msg is search('failed to validate')
+        success_msg: "Escena 2 OK: %s era {{ ruta_validada }}, no el destino, y el hermano no se ve desde allí"
+
+    # --- Escena 3: no hay shell -----------------------------------------------
+    - name: "Escena 3 — `true %s && false` (con shell fallaría)"
+      ansible.builtin.copy:
+        dest: "{{ dir_54 }}/e3.txt"
+        content: "x\n"
+        mode: "0644"
+        validate: "true %s && false"
+      register: e3_and
+
+    - name: "Escena 3 — `echo %s > fichero` (con shell crearía el fichero)"
+      ansible.builtin.copy:
+        dest: "{{ dir_54 }}/e3b.txt"
+        content: "x\n"
+        mode: "0644"
+        validate: "echo %s > {{ dir_54 }}/redirigido"
+      register: e3_redir
+
+    - name: "Escena 3 — ¿se creó el fichero de la redirección?"
+      ansible.builtin.stat:
+        path: "{{ dir_54 }}/redirigido"
+      register: e3_redirigido
+
+    - name: "Escena 3 — veredicto"
+      ansible.builtin.assert:
+        that:
+          - e3_and is changed
+          - e3_redir is changed
+          - not e3_redirigido.stat.exists
+        success_msg: "Escena 3 OK: validate no pasa por shell (&& y > son argumentos)"
+
+    # --- Escena 4: un solo %s, y nada más con % ----------------------------------
+    - name: "Escena 4 — dos %s"
+      ansible.builtin.copy:
+        dest: "{{ dir_54 }}/e4a.txt"
+        content: "clave=1\n"
+        mode: "0644"
+        validate: "grep -q clave %s %s"
+      register: e4_dos
+      ignore_errors: true
+
+    - name: "Escena 4 — dos %s otra vez, con failed_when false"
+      ansible.builtin.copy:
+        dest: "{{ dir_54 }}/e4a.txt"
+        content: "clave=1\n"
+        mode: "0644"
+        validate: "grep -q clave %s %s"
+      register: e4_dos_fw
+      failed_when: false
+
+    - name: "Escena 4 — un % suelto"
+      ansible.builtin.copy:
+        dest: "{{ dir_54 }}/e4b.txt"
+        content: "cpu=100%\n"
+        mode: "0644"
+        validate: "grep -q 100% %s"
+      register: e4_suelto
+      ignore_errors: true
+
+    - name: "Escena 4 — sin %s"
+      ansible.builtin.copy:
+        dest: "{{ dir_54 }}/e4c.txt"
+        content: "x\n"
+        mode: "0644"
+        validate: "true"
+      register: e4_sin
+      failed_when: false
+
+    - name: "Escena 4 — la receta: %% para el literal"
+      ansible.builtin.copy:
+        dest: "{{ dir_54 }}/e4b.txt"
+        content: "cpu=100%\n"
+        mode: "0644"
+        validate: "grep -q 100%% %s"
+      register: e4_escapado
+
+    - name: "Escena 4 — la receta: sh -c con $0 las veces que haga falta (fichero bueno)"
+      ansible.builtin.copy:
+        dest: "{{ dir_54 }}/e4d.txt"
+        content: "clave=1\n"
+        mode: "0644"
+        validate: "sh -c 'test -s \"$0\" && grep -q clave \"$0\"' %s"
+      register: e4_receta_bueno
+
+    - name: "Escena 4 — la receta: sh -c con $0 (fichero sin la clave)"
+      ansible.builtin.copy:
+        dest: "{{ dir_54 }}/e4e.txt"
+        content: "otra=1\n"
+        mode: "0644"
+        validate: "sh -c 'test -s \"$0\" && grep -q clave \"$0\"' %s"
+      register: e4_receta_malo
+      failed_when: false
+
+    - name: "Escena 4 — veredicto"
+      ansible.builtin.assert:
+        that:
+          - e4_dos.msg is search('not enough arguments for format string')
+          - e4_dos_fw.msg is not defined
+          - e4_dos_fw.failed_when_suppressed_exception is defined
+          - e4_suelto.msg is search('unsupported format character')
+          - e4_sin.msg is search('validate must contain %s')
+          - e4_escapado is changed
+          - e4_receta_bueno is changed
+          - e4_receta_malo.msg is search('failed to validate')
+        success_msg: "Escena 4 OK: un %s, %% para el literal, sh -c para todo lo demás"
+
+    # --- Escena 5: backup ---------------------------------------------------------
+    - name: "Escena 5 — cambio con backup"
+      ansible.builtin.copy:
+        dest: "{{ dir_54 }}/conf.json"
+        content: '{"puerto": 9090}'
+        mode: "0644"
+        backup: true
+        validate: "{{ valida_json }}"
+      register: e5_cambio
+
+    - name: "Escena 5 — la misma pasada otra vez"
+      ansible.builtin.copy:
+        dest: "{{ dir_54 }}/conf.json"
+        content: '{"puerto": 9090}'
+        mode: "0644"
+        backup: true
+        validate: "{{ valida_json }}"
+      register: e5_igual
+
+    - name: "Escena 5 — contar las copias"
+      ansible.builtin.find:
+        paths: "{{ dir_54 }}"
+        patterns: "conf.json.*"
+      register: e5_copias
+
+    - name: "Escena 5 — veredicto"
+      ansible.builtin.assert:
+        that:
+          - e5_cambio.backup_file | basename is match(patron_backup)
+          - e5_igual is not changed
+          - e5_igual.backup_file is not defined
+          - e5_copias.matched == 1
+        success_msg: "Escena 5 OK: {{ e5_cambio.backup_file | basename }}, y ninguna sin cambio"
+
+    # --- Escena 6: la copia huérfana --------------------------------------------
+    - name: "Escena 6 — copy con backup y un JSON roto"
+      ansible.builtin.copy:
+        dest: "{{ dir_54 }}/conf.json"
+        content: '{"puerto": '
+        mode: "0644"
+        backup: true
+        validate: "{{ valida_json }}"
+      register: e6_copy
+      failed_when: false
+
+    - name: "Escena 6 — contar tras el copy fallido"
+      ansible.builtin.find:
+        paths: "{{ dir_54 }}"
+        patterns: "conf.json.*"
+      register: e6_tras_copy
+
+    - name: "Escena 6 — lineinfile con backup y una línea que rompe el JSON"
+      ansible.builtin.lineinfile:
+        path: "{{ dir_54 }}/conf.json"
+        line: "roto"
+        backup: true
+        validate: "{{ valida_json }}"
+      register: e6_linea
+      failed_when: false
+
+    - name: "Escena 6 — contar tras el lineinfile fallido"
+      ansible.builtin.find:
+        paths: "{{ dir_54 }}"
+        patterns: "conf.json.*"
+      register: e6_tras_linea
+
+    - name: "Escena 6 — veredicto"
+      ansible.builtin.assert:
+        that:
+          - e6_copy.msg is search('failed to validate')
+          - e6_copy.backup_file is not defined
+          - e6_tras_copy.matched == 2
+          - e6_linea.msg is search('failed to validate')
+          - e6_linea.backup is not defined or not e6_linea.backup
+          - e6_tras_linea.matched == 3
+        success_msg: "Escena 6 OK: dos intentos fallidos, dos copias huérfanas que el resultado no menciona"
+
+    # --- Escena 7: --check no valida, y se valida el fichero entero ----------------
+    - name: "Escena 7 — un JSON roto en check mode"
+      ansible.builtin.copy:
+        dest: "{{ dir_54 }}/conf.json"
+        content: '{"roto'
+        mode: "0644"
+        validate: "{{ valida_json }}"
+      check_mode: true
+      register: e7_check
+      failed_when: false
+
+    - name: "Escena 7 — lineinfile añade una línea que por sí sola es JSON válido"
+      ansible.builtin.lineinfile:
+        path: "{{ dir_54 }}/conf.json"
+        line: '{"nuevo": true}'
+        validate: "{{ valida_json }}"
+      register: e7_linea
+      failed_when: false
+
+    - name: "Escena 7 — veredicto"
+      ansible.builtin.assert:
+        that:
+          - e7_check is changed
+          - not e7_check.failed
+          - e7_check.msg is not defined or 'validate' not in e7_check.msg
+          - e7_linea.msg is search('failed to validate')
+        success_msg: "Escena 7 OK: --check dice 'cambiaría' sin validar; lineinfile valida el fichero entero"
+
+    - name: Dejar la marca final que comprueba el CI
+      ansible.builtin.copy:
+        dest: "{{ dir_54 }}/TODAS-LAS-ESCENAS-OK"
+        content: "validate y backup: 7 escenas medidas\n"
+        mode: "0644"
