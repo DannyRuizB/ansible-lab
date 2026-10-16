@@ -1,0 +1,252 @@
+# =============================================================================
+# Playbook 55 — --start-at-task: relanzar desde donde falló (y lo que olvida)
+#
+# Un playbook largo falla en la tarea 40; `--start-at-task "nombre"` lo
+# relanza desde ahí sin repetir las 39 anteriores. Útil, y lleno de bordes.
+# Cuatro escenas, cada una en un playbook interior que deja un registro de
+# lo que corrió, medidas con ansible-core 2.21 antes de escribirlas:
+#
+#   - Escena 1 (lo que se salta): todo lo anterior al punto de arranque,
+#     incluidos los ROLES de `roles:` (corren antes que `tasks:`). Lo que
+#     esas tareas registraron no existe: con `| default` se ve el hueco, sin
+#     él la tarea falla. El handler que notificaba una tarea saltada no
+#     corre. Lo que NO se salta: la recogida de facts (`gather_facts`) y
+#     todo lo que va después, include dinámico incluido.
+#
+#   - Escena 2 (cómo se busca el nombre): admite comodines (`Tres*`), es
+#     sensible a mayúsculas, y una tarea de un rol importado se encuentra
+#     por su nombre y por `rol : nombre`.
+#
+#   - Escena 3 (LA TRAMPA): un nombre que no casa — una errata, otra
+#     capitalización, o una tarea DENTRO de un include_tasks (dinámico: no
+#     existe hasta que se ejecuta) — no corre NADA, ni los facts, y sale con
+#     rc 0. Solo queda una línea "[ERROR]: No matching task" en la salida.
+#     Un relanzamiento en CI con el nombre mal escrito "pasa" sin hacer nada.
+#     Una tarea de un import_tasks (estático) sí sirve de punto de arranque.
+#
+#   - Escena 4 (varios plays): los plays anteriores se saltan ENTEROS (lo
+#     que fijaron con set_fact no existe) y, en el play del punto de
+#     arranque, también sus pre_tasks. Arrancar en el set_fact del primer
+#     play lo conserva.
+#
+# Regla de andar por casa: relanzar con --start-at-task es reconstruir a
+# mano el estado que dejaron las tareas saltadas; lo que se lee de ellas
+# lleva `| default` o se vuelve a calcular, y el relanzamiento comprueba
+# que algo corrió de verdad (el rc 0 no lo dice).
+#
+# Ejecutar:
+#   ansible-playbook playbooks/55_start_at_task.yml
+# ...el CI lo ejecuta esperando rc 0 y comprobando la marca final.
+# =============================================================================
+
+- name: "Escenas de --start-at-task medidas en playbooks interiores"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    dir_55: /tmp/ansible-lab-55
+    entorno_55:
+      ANSIBLE_VAULT_PASSWORD_FILE: /tmp/ansible-lab-55/vault_pass
+      ANSIBLE_ROLES_PATH: /tmp/ansible-lab-55/roles
+      ANSIBLE_NOCOLOR: "1"
+    rol_55: !unsafe |
+      - name: Rol paso
+        ansible.builtin.shell: "echo ROL >> {{ registro }}"
+        changed_when: false
+    incluido: !unsafe |
+      - name: Dentro del include
+        ansible.builtin.shell: "echo INCLUDE >> {{ registro }}"
+        changed_when: false
+    importado: !unsafe |
+      - name: Dentro del import
+        ansible.builtin.shell: "echo IMPORT >> {{ registro }}"
+        changed_when: false
+    # Escenas 1-3: un play con rol, register, facts, handler, include e import.
+    relanzar: !unsafe |
+      - name: un play largo
+        hosts: localhost
+        gather_facts: true
+        roles:
+          - rol55
+        tasks:
+          - name: Uno registra
+            ansible.builtin.command: echo valor
+            register: r_uno
+            changed_when: true
+            notify: el handler
+          - name: Uno apunta
+            ansible.builtin.shell: "echo UNO >> {{ registro }}"
+            changed_when: false
+          - name: Dos usa lo de uno
+            ansible.builtin.shell: "echo DOS-{{ r_uno.stdout | default('INDEFINIDO') }} >> {{ registro }}"
+            changed_when: false
+          - name: Tres mira los facts
+            ansible.builtin.shell: "echo TRES-{{ ansible_facts.system | default('SIN-FACTS') }} >> {{ registro }}"
+            changed_when: false
+          - name: Tres B usa lo de uno sin default
+            ansible.builtin.shell: "echo TRESB-{{ r_uno.stdout }} >> {{ registro }}"
+            changed_when: false
+            ignore_errors: true
+          - name: El include
+            ansible.builtin.include_tasks: incluido.yml
+          - name: El import
+            ansible.builtin.import_tasks: importado.yml
+          - name: Cuatro
+            ansible.builtin.shell: "echo CUATRO >> {{ registro }}"
+            changed_when: false
+        handlers:
+          - name: el handler
+            ansible.builtin.shell: "echo HANDLER >> {{ registro }}"
+            changed_when: false
+    # Escena 4: dos plays, pre_tasks, un set_fact que cruza de uno a otro.
+    dos_plays: !unsafe |
+      - name: primero
+        hosts: localhost
+        gather_facts: false
+        tasks:
+          - name: P1 apunta
+            ansible.builtin.shell: "echo P1 >> {{ registro }}"
+            changed_when: false
+          - name: P1 fija
+            ansible.builtin.set_fact:
+              fijado_p1: si
+      - name: segundo
+        hosts: localhost
+        gather_facts: false
+        pre_tasks:
+          - name: P2 pre
+            ansible.builtin.shell: "echo P2PRE >> {{ registro }}"
+            changed_when: false
+        tasks:
+          - name: P2 lee lo de P1
+            ansible.builtin.shell: "echo P2-{{ fijado_p1 | default('SIN-P1') }} >> {{ registro }}"
+            changed_when: false
+          - name: P2 importa el rol
+            ansible.builtin.import_role:
+              name: rol55
+          - name: P2 fin
+            ansible.builtin.shell: "echo P2FIN >> {{ registro }}"
+            changed_when: false
+
+  tasks:
+    - name: Empezar de cero
+      ansible.builtin.file:
+        path: "{{ dir_55 }}"
+        state: absent
+      changed_when: false
+
+    - name: Crear el árbol del rol interior
+      ansible.builtin.file:
+        path: "{{ dir_55 }}/roles/rol55/tasks"
+        state: directory
+        mode: "0755"
+      changed_when: false
+
+    - name: Dejar un fichero de vault (sin uso) para el ansible anidado
+      ansible.builtin.copy:
+        content: "sin-uso\n"
+        dest: "{{ entorno_55.ANSIBLE_VAULT_PASSWORD_FILE }}"
+        mode: "0600"
+      changed_when: false
+
+    - name: Escribir los interiores y el rol
+      ansible.builtin.copy:
+        content: "{{ item.content }}"
+        dest: "{{ dir_55 }}/{{ item.file }}"
+        mode: "0644"
+      loop:
+        - { file: roles/rol55/tasks/main.yml, content: "{{ rol_55 }}" }
+        - { file: incluido.yml, content: "{{ incluido }}" }
+        - { file: importado.yml, content: "{{ importado }}" }
+        - { file: relanzar.yml, content: "{{ relanzar }}" }
+        - { file: dos_plays.yml, content: "{{ dos_plays }}" }
+      loop_control:
+        label: "{{ item.file }}"
+      changed_when: false
+
+    - name: Correr cada interior, entero o desde una tarea
+      ansible.builtin.command:
+        argv: "{{ ['ansible-playbook', '-i', 'localhost,', '-c', 'local', dir_55 ~ '/' ~ item.file,
+                  '-e', 'registro=' ~ dir_55 ~ '/' ~ item.id ~ '.log',
+                  '-e', 'ansible_python_interpreter=' ~ ansible_playbook_python]
+                 + (['--start-at-task', item.desde] if item.desde else []) }}"
+      loop:
+        - { id: entero, file: relanzar.yml, desde: "" }
+        - { id: desde_dos, file: relanzar.yml, desde: "Dos usa lo de uno" }
+        - { id: comodin, file: relanzar.yml, desde: "Tres*" }
+        - { id: minusculas, file: relanzar.yml, desde: "dos usa lo de uno" }
+        - { id: no_existe, file: relanzar.yml, desde: "Dos usa lo de dos" }
+        - { id: en_include, file: relanzar.yml, desde: "Dentro del include" }
+        - { id: en_import, file: relanzar.yml, desde: "Dentro del import" }
+        - { id: p2, file: dos_plays.yml, desde: "P2 lee lo de P1" }
+        - { id: p1_fija, file: dos_plays.yml, desde: "P1 fija" }
+        - { id: p2_rol, file: dos_plays.yml, desde: "Rol paso" }
+        - { id: p2_rol_prefijo, file: dos_plays.yml, desde: "rol55 : Rol paso" }
+      loop_control:
+        label: "{{ item.id }}"
+      register: corridas
+      failed_when: false
+      changed_when: false
+      environment: "{{ entorno_55 }}"
+
+    - name: Leer los registros (ninguno = no corrió nada), los rc y las salidas
+      ansible.builtin.set_fact:
+        visto: >-
+          {{ visto | default({}) | combine({item.item.id: (lookup('ansible.builtin.file', dir_55 ~ '/' ~ item.item.id ~ '.log', errors='ignore')
+             | default('', true)).splitlines()}) }}
+        rc: "{{ rc | default({}) | combine({item.item.id: item.rc}) }}"
+        salida: "{{ salida | default({}) | combine({item.item.id: item.stdout ~ item.stderr}) }}"
+      loop: "{{ corridas.results }}"
+      loop_control:
+        label: "{{ item.item.id }}"
+
+    - name: "Veredicto 1 — lo que se salta y lo que no"
+      ansible.builtin.assert:
+        that:
+          - rc.entero == 0
+          - visto.entero == ['ROL', 'UNO', 'DOS-valor', 'TRES-Linux', 'TRESB-valor', 'INCLUDE', 'IMPORT', 'CUATRO', 'HANDLER']
+          - rc.desde_dos == 0
+          - visto.desde_dos == ['DOS-INDEFINIDO', 'TRES-Linux', 'INCLUDE', 'IMPORT', 'CUATRO']
+          - salida.desde_dos is search('Gathering Facts')
+          - salida.desde_dos is search("'r_uno' is undefined")
+        success_msg: "desde 'Dos': sin ROL, sin UNO, r_uno indefinido (TRESB falla), sin HANDLER; facts y el include sí"
+        fail_msg: "entero {{ visto.entero | to_json }} / desde_dos {{ visto.desde_dos | to_json }} (rc {{ rc.desde_dos }})"
+
+    - name: "Veredicto 2 — cómo se busca el nombre"
+      ansible.builtin.assert:
+        that:
+          - visto.comodin == ['TRES-Linux', 'INCLUDE', 'IMPORT', 'CUATRO']
+          - visto.minusculas == []
+          - visto.p2_rol == ['ROL', 'P2FIN']
+          - visto.p2_rol_prefijo == ['ROL', 'P2FIN']
+        success_msg: "'Tres*' vale; 'dos usa…' en minúsculas no casa; las tareas de rol se encuentran por nombre y por 'rol : nombre'"
+        fail_msg: "{{ visto | to_json }}"
+
+    - name: "Veredicto 3 — un nombre que no casa no corre NADA, y rc 0"
+      ansible.builtin.assert:
+        that:
+          - rc.no_existe == 0
+          - visto.no_existe == []
+          - salida.no_existe is search('No matching task "Dos usa lo de dos" found')
+          - salida.no_existe is not search('Gathering Facts')
+          - rc.minusculas == 0
+          - rc.en_include == 0
+          - visto.en_include == []
+          - salida.en_include is search('can only follow static includes')
+          - visto.en_import == ['IMPORT', 'CUATRO']
+        success_msg: "errata, mayúsculas o tarea de un include_tasks: rc 0 sin correr nada (ni facts); la del import_tasks sí arranca"
+        fail_msg: "{{ rc | to_json }} {{ visto.no_existe | to_json }} {{ visto.en_include | to_json }} {{ visto.en_import | to_json }}"
+
+    - name: "Veredicto 4 — varios plays: los anteriores y los pre_tasks se saltan"
+      ansible.builtin.assert:
+        that:
+          - visto.p2 == ['P2-SIN-P1', 'ROL', 'P2FIN']
+          - visto.p1_fija == ['P2PRE', 'P2-si', 'ROL', 'P2FIN']
+        success_msg: "desde el play 2: sin P1, sin su set_fact y sin P2PRE; desde el set_fact del play 1: se conserva"
+        fail_msg: "p2 {{ visto.p2 | to_json }} / p1_fija {{ visto.p1_fija | to_json }}"
+
+    - name: Dejar la marca final que comprueba el CI
+      ansible.builtin.copy:
+        content: "--start-at-task: 4 escenas medidas\n"
+        dest: "{{ dir_55 }}/TODAS-LAS-ESCENAS-OK"
+        mode: "0644"
+      changed_when: false
