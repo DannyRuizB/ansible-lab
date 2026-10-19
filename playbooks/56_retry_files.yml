@@ -1,0 +1,266 @@
+# =============================================================================
+# Playbook 56 — retry files y --limit @fichero: relanzar solo los que fallaron
+#
+# Una pasada sobre 200 hosts falla en 3. Con `retry_files_enabled` Ansible
+# escribe sus nombres en `<playbook>.retry` y propone relanzar con
+# `--limit @<playbook>.retry`, que es un fichero con un host por línea.
+# Este lab lo tiene apagado en ansible.cfg (y Ansible también, por defecto).
+# Cinco escenas en playbooks interiores, medidas con ansible-core 2.21
+# antes de escribirlas (hipótesis incluidas que la medida desmintió):
+#
+#   - Escena 1 (qué entra): los FALLIDOS y los INALCANZABLES. No entra el
+#     host rescatado por un block/rescue ni el de `ignore_errors` (para
+#     Ansible ninguno falló). Sin activarlo no se escribe nada. Relanzar con
+#     `--limit @fichero` toca solo esos hosts.
+#
+#   - Escena 2 (un play abortado): con `any_errors_fatal` o
+#     `max_fail_percentage: 0`, un fallo corta a todos — y el .retry incluye
+#     también a los cortados sin fallar. (Esperaba que no; lo hace.)
+#
+#   - Escena 3 (LA PRIMERA TRAMPA, serial): con `serial: 1`, cuando un lote
+#     entero falla la play se para, y los lotes que NO EMPEZARON no salen ni
+#     en el resumen ni en el .retry. Relanzar con @retry los deja fuera.
+#
+#   - Escena 4 (el .retry viejo): una pasada limpia NO lo borra. Que exista
+#     un .retry no dice que la última pasada fallara.
+#
+#   - Escena 5 (LA TRAMPA GORDA): `--limit @fichero` con el fichero VACÍO (o
+#     solo líneas en blanco) no limita nada: apunta a TODOS los hosts, rc 0
+#     — igual que `--limit ''`. Un `#` no es un comentario sino un patrón que
+#     no casa nada (error, rc 1), y un fichero inexistente es rc 1. Un
+#     relanzamiento que genera su lista con un grep que sale vacío pasa por
+#     toda la flota.
+#
+# Regla de andar por casa: antes de `--limit @fichero`, comprobar que el
+# fichero tiene al menos un host (`test -s` no basta: las líneas en blanco
+# cuentan como contenido), y con `serial` no fiarse del .retry: relanzar el
+# playbook entero, que es idempotente.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/56_retry_files.yml
+# ...el CI lo ejecuta esperando rc 0 y comprobando la marca final.
+# =============================================================================
+
+- name: "Escenas de retry files medidas en playbooks interiores"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    dir_56: /tmp/ansible-lab-56
+    entorno_56:
+      ANSIBLE_VAULT_PASSWORD_FILE: /tmp/ansible-lab-56/vault_pass
+      ANSIBLE_NOCOLOR: "1"
+      ANSIBLE_HOST_KEY_CHECKING: "False"
+    # `caido` es inalcanzable de verdad: ssh a un puerto cerrado de 127.0.0.1
+    # (conexión rechazada al instante, sin esperar a ningún timeout).
+    inventario: |
+      [flota]
+      ok1 ansible_connection=local
+      falla ansible_connection=local
+      rescata ansible_connection=local
+      caido ansible_connection=ssh ansible_host=127.0.0.1 ansible_port=1
+      ok2 ansible_connection=local
+    flota: !unsafe |
+      - name: flota
+        hosts: flota
+        gather_facts: false
+        tasks:
+          - name: Paso 1
+            ansible.builtin.ping:
+          - name: El que falla
+            ansible.builtin.fail:
+              msg: roto
+            when: inventory_hostname == 'falla'
+          - name: Rescate
+            block:
+              - name: Falla dentro del block
+                ansible.builtin.fail:
+                  msg: roto pero rescatado
+                when: inventory_hostname == 'rescata'
+            rescue:
+              - name: Rescatado
+                ansible.builtin.debug:
+                  msg: rescatado
+          - name: Ignorado
+            ansible.builtin.command: /bin/false
+            ignore_errors: true
+            changed_when: false
+            when: inventory_hostname == 'ok2'
+          - name: Paso final
+            ansible.builtin.debug:
+              msg: fin
+    # Escenas 2 y 3: la misma play pequeña con cada forma de cortar.
+    corte: !unsafe |
+      - name: corte
+        hosts: ok1,falla,ok2
+        gather_facts: false
+        CORTE
+        tasks:
+          - name: El que falla
+            ansible.builtin.fail:
+              msg: roto
+            when: inventory_hostname == 'falla'
+          - name: Paso final
+            ansible.builtin.debug:
+              msg: fin
+    arreglable: !unsafe |
+      - name: arreglable
+        hosts: ok1,falla
+        gather_facts: false
+        tasks:
+          - name: Falla salvo arreglado
+            ansible.builtin.fail:
+              msg: roto
+            when: inventory_hostname == 'falla' and not (arreglado | default(false) | bool)
+
+  tasks:
+    - name: Empezar de cero
+      ansible.builtin.file:
+        path: "{{ dir_56 }}"
+        state: absent
+      changed_when: false
+
+    - name: Crear el directorio de las escenas
+      ansible.builtin.file:
+        path: "{{ dir_56 }}"
+        state: directory
+        mode: "0755"
+      changed_when: false
+
+    - name: Dejar un fichero de vault (sin uso) para el ansible anidado
+      ansible.builtin.copy:
+        content: "sin-uso\n"
+        dest: "{{ entorno_56.ANSIBLE_VAULT_PASSWORD_FILE }}"
+        mode: "0600"
+      changed_when: false
+
+    # Un playbook por corrida que escribe su .retry: el fichero se llama como
+    # el playbook, así cada escena deja el suyo y nada se pisa.
+    - name: Escribir el inventario, los interiores y las listas de --limit
+      ansible.builtin.copy:
+        content: "{{ item.content }}"
+        dest: "{{ dir_56 }}/{{ item.file }}"
+        mode: "0644"
+      loop:
+        - { file: inventario.ini, content: "{{ inventario }}" }
+        - { file: por_defecto.yml, content: "{{ flota }}" }
+        - { file: activado.yml, content: "{{ flota }}" }
+        - { file: fatal.yml, content: "{{ corte | replace('CORTE', 'any_errors_fatal: true') }}" }
+        - { file: porcentaje.yml, content: "{{ corte | replace('CORTE', 'max_fail_percentage: 0') }}" }
+        - { file: serie.yml, content: "{{ corte | replace('CORTE', 'serial: 1') }}" }
+        - { file: arreglable.yml, content: "{{ arreglable }}" }
+        - { file: uno.lista, content: "falla\n" }
+        - { file: vacia.lista, content: "" }
+        - { file: blancos.lista, content: "\n\n" }
+        - { file: comentario.lista, content: "# relanzar estos\n" }
+      loop_control:
+        label: "{{ item.file }}"
+      changed_when: false
+
+    - name: Correr cada interior (en orden)
+      ansible.builtin.command:
+        argv: "{{ ['ansible-playbook', '-i', dir_56 ~ '/inventario.ini', dir_56 ~ '/' ~ item.file,
+                  '-e', 'ansible_python_interpreter=' ~ ansible_playbook_python] + item.extra | default([]) }}"
+      loop:
+        - { id: por_defecto, file: por_defecto.yml, retry: "0" }
+        - { id: activado, file: activado.yml, retry: "1" }
+        - { id: relanzado, file: activado.yml, retry: "0", extra: ["--limit", "@/tmp/ansible-lab-56/activado.retry"] }
+        - { id: fatal, file: fatal.yml, retry: "1" }
+        - { id: porcentaje, file: porcentaje.yml, retry: "1" }
+        - { id: serie, file: serie.yml, retry: "1" }
+        - { id: viejo_falla, file: arreglable.yml, retry: "1" }
+        - { id: viejo_limpio, file: arreglable.yml, retry: "1", extra: ["-e", "arreglado=true"] }
+        - { id: uno, file: por_defecto.yml, retry: "0", extra: ["--list-hosts", "--limit", "@/tmp/ansible-lab-56/uno.lista"] }
+        - { id: vacia, file: por_defecto.yml, retry: "0", extra: ["--list-hosts", "--limit", "@/tmp/ansible-lab-56/vacia.lista"] }
+        - { id: blancos, file: por_defecto.yml, retry: "0", extra: ["--list-hosts", "--limit", "@/tmp/ansible-lab-56/blancos.lista"] }
+        - { id: comentario, file: por_defecto.yml, retry: "0", extra: ["--list-hosts", "--limit", "@/tmp/ansible-lab-56/comentario.lista"] }
+        - { id: no_existe, file: por_defecto.yml, retry: "0", extra: ["--list-hosts", "--limit", "@/tmp/ansible-lab-56/no_existe.lista"] }
+      loop_control:
+        label: "{{ item.id }}"
+      register: corridas
+      failed_when: false
+      changed_when: false
+      environment: "{{ entorno_56 | combine({'ANSIBLE_RETRY_FILES_ENABLED': item.retry}) }}"
+
+    # Lo de cada corrida: rc, salida, los hosts del resumen final (PLAY RECAP)
+    # y, para las de --list-hosts, cuántos hosts iba a tocar.
+    - name: Leer rc, salidas, resúmenes y cuentas de hosts
+      ansible.builtin.set_fact:
+        rc: "{{ rc | default({}) | combine({item.item.id: item.rc}) }}"
+        salida: "{{ salida | default({}) | combine({item.item.id: item.stdout ~ item.stderr}) }}"
+        resumen: >-
+          {{ resumen | default({}) | combine({item.item.id: item.stdout_lines
+             | select('match', '^\S+\s+:\s+ok=') | map('regex_replace', '^(\S+)\s.*$', '\1') | sort}) }}
+        apunta: >-
+          {{ apunta | default({}) | combine({item.item.id: (item.stdout | regex_search('hosts \((\d+)\)', '\1')
+             | default(['-1'], true) | first | int)}) }}
+      loop: "{{ corridas.results }}"
+      loop_control:
+        label: "{{ item.item.id }}"
+
+    # Lo que queda escrito en cada .retry al final de todas las corridas.
+    - name: Leer los retry files (ninguno = no se escribió)
+      ansible.builtin.set_fact:
+        retry: >-
+          {{ retry | default({}) | combine({item: (lookup('ansible.builtin.file', dir_56 ~ '/' ~ item ~ '.retry', errors='ignore')
+             | default('', true)).splitlines() | sort}) }}
+      loop: [por_defecto, activado, fatal, porcentaje, serie, arreglable]
+
+    - name: Escena 1 — entran los fallidos y los inalcanzables, no el rescatado ni el ignorado
+      ansible.builtin.assert:
+        that:
+          - rc.por_defecto == 4
+          - retry.por_defecto == []
+          - rc.activado == 4
+          - retry.activado == ['caido', 'falla']
+          - "'to retry, use: --limit @' in salida.activado"
+          - resumen.relanzado == ['caido', 'falla']
+        fail_msg: "{{ {'rc': rc, 'retry': retry, 'resumen_relanzado': resumen.relanzado} | to_json }}"
+        quiet: true
+
+    - name: Escena 2 — un play abortado mete en el .retry también a los cortados sin fallar
+      ansible.builtin.assert:
+        that:
+          - rc.fatal == 2
+          - retry.fatal == ['falla', 'ok1', 'ok2']
+          - rc.porcentaje == 2
+          - retry.porcentaje == ['falla', 'ok1', 'ok2']
+        fail_msg: "{{ {'retry_fatal': retry.fatal, 'retry_porcentaje': retry.porcentaje} | to_json }}"
+        quiet: true
+
+    - name: Escena 3 — con serial, los lotes que no empezaron no salen ni en el resumen ni en el .retry
+      ansible.builtin.assert:
+        that:
+          - rc.serie == 2
+          - resumen.serie == ['falla', 'ok1']
+          - retry.serie == ['falla']
+        fail_msg: "{{ {'resumen_serie': resumen.serie, 'retry_serie': retry.serie} | to_json }}"
+        quiet: true
+
+    - name: Escena 4 — una pasada limpia no borra el .retry viejo
+      ansible.builtin.assert:
+        that:
+          - rc.viejo_falla == 2
+          - rc.viejo_limpio == 0
+          - retry.arreglable == ['falla']
+        fail_msg: "{{ {'rc_viejo': [rc.viejo_falla, rc.viejo_limpio], 'retry_arreglable': retry.arreglable} | to_json }}"
+        quiet: true
+
+    - name: Escena 5 — una lista vacía no limita NADA; un comentario es un patrón; sin fichero, rc 1
+      ansible.builtin.assert:
+        that:
+          - rc.uno == 0 and apunta.uno == 1
+          - rc.vacia == 0 and apunta.vacia == 5
+          - rc.blancos == 0 and apunta.blancos == 5
+          - rc.comentario == 1
+          - "'no hosts to target' in salida.comentario"
+          - rc.no_existe == 1
+          - "'Unable to find limit file' in salida.no_existe"
+        fail_msg: "{{ {'rc': rc, 'apunta': apunta} | to_json }}"
+        quiet: true
+
+    - name: Marca final (el CI la exige)
+      ansible.builtin.copy:
+        content: "retry files: 5 escenas medidas (serial los olvida, el viejo se queda, la lista vacía es TODA la flota)\n"
+        dest: "{{ dir_56 }}/TODAS-LAS-ESCENAS-OK"
+        mode: "0644"
+      changed_when: false

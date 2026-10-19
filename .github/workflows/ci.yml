@@ -425,6 +425,14 @@ jobs:
           ansible-playbook playbooks/55_start_at_task.yml
           test -f /tmp/ansible-lab-55/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
 
+      # retry files: entran fallidos e inalcanzables (y los cortados por un
+      # play abortado); con serial los lotes sin empezar no; una pasada limpia
+      # no borra el .retry; y `--limit @lista` vacía apunta a TODA la flota.
+      - name: "Playbook 56 — retry files y --limit @fichero (asserts incluidos)"
+        run: |
+          ansible-playbook playbooks/56_retry_files.yml
+          test -f /tmp/ansible-lab-56/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \
