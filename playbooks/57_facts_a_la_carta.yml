@@ -1,0 +1,384 @@
+# =============================================================================
+# Playbook 57 — facts a la carta: gather_subset, filter y lo que setup calla
+#
+# Cada play empieza recogiendo ~120 facts del host (red, discos, CPU, BIOS,
+# montajes…) aunque luego use dos. `gather_subset` y el `filter` de setup
+# parecen dos formas de pedir menos; no lo son. Cinco escenas, medidas con
+# ansible-core 2.21 antes de escribirlas (en el PC del lab: 118 facts con
+# todo, 49 con el mínimo):
+#
+#   - Escena 1 (el play ya puede pedir menos): `gather_subset: ['!all']` en
+#     el propio play recoge solo el subconjunto `min` (nombre, distro,
+#     usuario, entorno, fecha…): sin memoria ni interfaces.
+#
+#   - Escena 2 (qué trae cada subset): `!all` y `min` son lo mismo;
+#     `!all,network` = min + red; `!all,hardware` = min + discos y memoria; y
+#     `!all,!min` no trae casi nada: solo `gather_subset` y `module_setup`. El
+#     resultado REGISTRADO de setup tiene solo lo de esa llamada — y con otros
+#     nombres: `ansible_interfaces`, `ansible_memtotal_mb`… con el prefijo,
+#     que la variable `ansible_facts` quita (`interfaces`). Un
+#     `r.ansible_facts.interfaces` sobre lo registrado no existe. La
+#     excepción: los facts.d (playbook 10) siguen siendo `ansible_local`
+#     también dentro de `ansible_facts`.
+#
+#   - Escena 3 (LA TRAMPA, filter): `filter` recorta lo que VES, no lo que
+#     se recoge: setup ejecuta todos los colectores y luego tira lo que no
+#     casa. La prueba que no depende del reloj: un fact local ejecutable
+#     (facts.d, vía `fact_path`) deja una huella cada vez que el colector
+#     `local` corre — y con `filter: default_ipv4` corre, aunque solo vuelva
+#     default_ipv4; con `gather_subset` de solo red, no. El reloj lo
+#     confirma (informativo, no se exige: en el PC 1,2 s frente a 0,38 s de
+#     `!all`; en el runner del CI 0,8 frente a 0,47). Acepta el nombre con o
+#     sin `ansible_` y comodines (`ansible_*_mb`), pero un punto
+#     (`ansible_default_ipv4.address`) no entra en el fact: devuelve NADA,
+#     sin error.
+#
+#   - Escena 4 (setup suma, no reemplaza): tras recogerlo todo, un setup con
+#     `!all` deja los 118 facts — los de hardware siguen ahí, viejos — y el
+#     fact `gather_subset` dice ['!all']: miente sobre lo que hay. Para
+#     empezar de cero, `meta: clear_facts`.
+#
+#   - Escena 5 (los facts de primer nivel se acaban): `{{ ansible_hostname }}`
+#     funciona por la inyección INJECT_FACTS_AS_VARS, que en 2.21 avisa por
+#     stderr (con fichero:línea:columna del uso) de que su valor por defecto
+#     cambia y desaparece en 2.24. Con la inyección apagada, rc 2 y
+#     "'ansible_hostname' is undefined". `ansible_facts.hostname` va igual en
+#     los dos mundos y sin aviso.
+#
+# Regla de andar por casa: si una play solo necesita el nombre o la distro,
+# `gather_subset: ['!all']` (o `gather_facts: false` y un setup con el subset
+# justo); `filter` sirve para leer menos, nunca para ir más rápido; y los
+# facts, por `ansible_facts.*`.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/57_facts_a_la_carta.yml
+# ...el CI lo ejecuta esperando rc 0 y comprobando la marca final.
+# =============================================================================
+
+- name: "Escena 1 — el play ya puede pedir menos"
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  gather_subset: ["!all"]
+  tasks:
+    - name: Escena 1 — con '!all' en el play hay nombre y distro, pero ni memoria ni interfaces
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.hostname is defined
+          - ansible_facts.distribution is defined
+          - ansible_facts.memtotal_mb is not defined
+          - ansible_facts.interfaces is not defined
+        fail_msg: "{{ ansible_facts.keys() | list | sort | to_json }}"
+        quiet: true
+
+    - name: Vaciar los facts para que la siguiente play empiece de cero
+      ansible.builtin.meta: clear_facts
+
+- name: "Escenas 2 a 5 medidas en el controlador"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    dir_57: /tmp/ansible-lab-57
+    entorno_57:
+      ANSIBLE_VAULT_PASSWORD_FILE: /tmp/ansible-lab-57/vault_pass
+      ANSIBLE_NOCOLOR: "1"
+    # Escena 5: el mismo dato por las dos puertas.
+    primer_nivel: !unsafe |
+      - name: primer nivel
+        hosts: localhost
+        connection: local
+        gather_facts: true
+        gather_subset: ["!all"]
+        tasks:
+          - name: Por el nombre de siempre
+            ansible.builtin.debug:
+              msg: "PRIMER-NIVEL={{ ansible_hostname }}"
+    via_facts: !unsafe |
+      - name: via ansible_facts
+        hosts: localhost
+        connection: local
+        gather_facts: true
+        gather_subset: ["!all"]
+        tasks:
+          - name: Por ansible_facts
+            ansible.builtin.debug:
+              msg: "VIA-FACTS={{ ansible_facts.hostname }}"
+
+  tasks:
+    - name: Empezar de cero
+      ansible.builtin.file:
+        path: "{{ dir_57 }}"
+        state: absent
+      changed_when: false
+
+    - name: Crear el directorio de trabajo (y el facts.d de la escena 3)
+      ansible.builtin.file:
+        path: "{{ dir_57 }}/facts.d"
+        state: directory
+        mode: "0755"
+      changed_when: false
+
+    # --- Escena 2: un setup por subset; el resultado registrado es solo suyo.
+    - name: Escena 2 — recoger con cada subset
+      ansible.builtin.setup:
+        gather_subset: "{{ item.subset }}"
+      loop:
+        - { id: todo, subset: ["all"] }
+        - { id: no_todo, subset: ["!all"] }
+        - { id: minimo, subset: ["min"] }
+        - { id: nada, subset: ["!all", "!min"] }
+        - { id: red, subset: ["!all", "network"] }
+        - { id: hardware, subset: ["!all", "hardware"] }
+      loop_control:
+        label: "{{ item.id }}"
+      register: por_subset
+
+    - name: Escena 2 — lo registrado lleva el prefijo 'ansible_'; la variable ansible_facts no
+      ansible.builtin.assert:
+        that:
+          - "'ansible_interfaces' in por_subset.results[4].ansible_facts"
+          - "'interfaces' not in por_subset.results[4].ansible_facts"
+          - ansible_facts.interfaces is defined
+          - "'ansible_local' in ansible_facts and 'local' not in ansible_facts"
+          - por_subset.results[3].ansible_facts.keys() | list | sort == ['gather_subset', 'module_setup']
+        quiet: true
+
+    # Para comparar, los nombres como los ve ansible_facts (sin el prefijo,
+    # salvo ansible_local).
+    - name: Escena 2 — las claves de cada uno
+      ansible.builtin.set_fact:
+        claves: >-
+          {{ claves | default({}) | combine({item.item.id: item.ansible_facts.keys()
+             | map('regex_replace', '^ansible_(?!local$)', '') | list | sort}) }}
+      loop: "{{ por_subset.results }}"
+      loop_control:
+        label: "{{ item.item.id }}"
+
+    - name: Escena 2 — cuántos facts trae cada subset
+      ansible.builtin.debug:
+        msg: >-
+          {{ claves | dict2items | map(attribute='key')
+             | zip(claves | dict2items | map(attribute='value') | map('length'))
+             | map('join', '=') | join('  ') }}
+
+    - name: Escena 2 — '!all' es 'min'; '!all,!min' casi nada; red y hardware se suman al mínimo
+      ansible.builtin.assert:
+        that:
+          - claves.no_todo == claves.minimo
+          - claves.nada | difference(['gather_subset', 'module_setup', 'discovered_interpreter_python']) == []
+          - "'hostname' not in claves.nada"
+          - claves.minimo | difference(claves.red) == []
+          - "'interfaces' in claves.red and 'memtotal_mb' not in claves.red"
+          - claves.minimo | difference(claves.hardware) == []
+          - "'memtotal_mb' in claves.hardware and 'interfaces' not in claves.hardware"
+          - claves.todo | length > claves.red | length > claves.minimo | length > claves.nada | length
+        fail_msg: "{{ claves.nada | to_json }}"
+        quiet: true
+
+    # --- Escena 3: qué deja pasar filter, y cuánto cuesta.
+    - name: Escena 3 — setup con distintos filtros (registrado)
+      ansible.builtin.setup:
+        filter: "{{ item.filtro }}"
+      loop:
+        - { id: con_prefijo, filtro: ansible_default_ipv4 }
+        - { id: sin_prefijo, filtro: default_ipv4 }
+        - { id: con_punto, filtro: ansible_default_ipv4.address }
+        - { id: comodin, filtro: "ansible_*_mb" }
+        - { id: lista, filtro: [ansible_hostname, ansible_fqdn] }
+      loop_control:
+        label: "{{ item.id }}"
+      register: por_filtro
+
+    - name: Escena 3 — las claves que devolvió cada filtro (sin el intérprete descubierto)
+      ansible.builtin.set_fact:
+        filtradas: >-
+          {{ filtradas | default({}) | combine({item.item.id: item.ansible_facts.keys()
+             | map('regex_replace', '^ansible_(?!local$)', '') | reject('equalto', 'discovered_interpreter_python') | list | sort}) }}
+      loop: "{{ por_filtro.results }}"
+      loop_control:
+        label: "{{ item.item.id }}"
+
+    - name: Escena 3 — con o sin 'ansible_' es lo mismo; un punto no devuelve NADA y no falla
+      ansible.builtin.assert:
+        that:
+          - filtradas.con_prefijo == filtradas.sin_prefijo
+          - filtradas.con_punto == []
+          - por_filtro.results[2] is not failed
+          - filtradas.comodin | length > 0
+          - filtradas.comodin | reject('match', '^.*_mb$') | list == []
+          - filtradas.lista == ['fqdn', 'hostname']
+        fail_msg: "{{ filtradas | to_json }}"
+        quiet: true
+
+    # La prueba que no depende del reloj: el colector `local` ejecuta los
+    # facts.d ejecutables, y esta sonda deja una huella cada vez que corre.
+    - name: Escena 3 — un fact local que deja huella al ejecutarse
+      ansible.builtin.copy:
+        content: |
+          #!/bin/sh
+          echo corrio >> {{ dir_57 }}/huella
+          echo '{"sonda": 1}'
+        dest: "{{ dir_57 }}/facts.d/sonda.fact"
+        mode: "0755"
+      changed_when: false
+
+    - name: Escena 3 — filter pidiendo solo default_ipv4, con la sonda en fact_path
+      ansible.builtin.setup:
+        filter: default_ipv4
+        fact_path: "{{ dir_57 }}/facts.d"
+      register: con_filtro
+
+    - name: Escena 3 — ¿corrió el colector local?
+      ansible.builtin.stat:
+        path: "{{ dir_57 }}/huella"
+      register: huella_filtro
+
+    - name: Escena 3 — borrar la huella
+      ansible.builtin.file:
+        path: "{{ dir_57 }}/huella"
+        state: absent
+      changed_when: false
+
+    - name: Escena 3 — gather_subset de solo red, con la misma sonda
+      ansible.builtin.setup:
+        gather_subset: ["!all", "!min", "network"]
+        fact_path: "{{ dir_57 }}/facts.d"
+
+    - name: Escena 3 — ¿y ahora?
+      ansible.builtin.stat:
+        path: "{{ dir_57 }}/huella"
+      register: huella_subset
+
+    - name: Escena 3 — con filter el colector corrió aunque solo volviera default_ipv4; con el subset, no
+      ansible.builtin.assert:
+        that:
+          - huella_filtro.stat.exists
+          - con_filtro.ansible_facts.keys() | reject('equalto', 'discovered_interpreter_python') | list == ['ansible_default_ipv4']
+          - not huella_subset.stat.exists
+        fail_msg: "huella con filter={{ huella_filtro.stat.exists }}, con subset={{ huella_subset.stat.exists }}"
+        quiet: true
+
+    - name: Escena 3 — cronometrar filter frente a '!all', tres veces cada uno (alternados)
+      ansible.builtin.include_tasks: tasks/57_cronometro.yml
+      loop: "{{ [{'forma': 'filter', 'filtro': 'default_ipv4'}, {'forma': 'minimo', 'subset': ['!all']}] * 3 }}"
+      loop_control:
+        loop_var: medida
+        label: "{{ medida.forma }}"
+      vars:
+        forma: "{{ medida.forma }}"
+        filtro: "{{ medida.filtro | default(omit) }}"
+        subset: "{{ medida.subset | default(omit) }}"
+
+    - name: Escena 3 — las medianas
+      ansible.builtin.set_fact:
+        mediana_filter: "{{ (tiempos_57.filter | sort)[1] | float | round(2) }}"
+        mediana_minimo: "{{ (tiempos_57.minimo | sort)[1] | float | round(2) }}"
+
+    # Informativo: el reloj de un runner compartido no es una prueba (en el
+    # CI la diferencia fue 0,8 s frente a 0,47; en el PC, 1,2 frente a 0,38).
+    - name: Escena 3 — lo que costó cada uno (informativo)
+      ansible.builtin.debug:
+        msg: "filter default_ipv4: {{ mediana_filter }} s   gather_subset !all: {{ mediana_minimo }} s (medianas de 3)"
+
+    # --- Escena 4: setup suma; clear_facts vacía.
+    - name: Escena 4 — recogerlo todo y luego solo el mínimo
+      ansible.builtin.setup:
+        gather_subset: "{{ item }}"
+      loop:
+        - ["all"]
+        - ["!all"]
+
+    - name: Escena 4 — tras el mínimo siguen los facts de hardware, y gather_subset dice '!all'
+      ansible.builtin.assert:
+        that:
+          - ansible_facts | length == claves.todo | length
+          - ansible_facts.memtotal_mb is defined
+          - ansible_facts.gather_subset == ['!all']
+        fail_msg: "{{ ansible_facts | length }} facts, gather_subset={{ ansible_facts.gather_subset }}"
+        quiet: true
+
+    - name: Escena 4 — vaciar los facts
+      ansible.builtin.meta: clear_facts
+
+    - name: Escena 4 — tras clear_facts no queda nada
+      ansible.builtin.assert:
+        that:
+          - ansible_facts | length == 0
+        quiet: true
+
+    - name: Escena 4 — y ahora sí, solo el mínimo
+      ansible.builtin.setup:
+        gather_subset: ["!all"]
+
+    - name: Escena 4 — el mínimo, sin restos de hardware
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.keys() | list | sort == claves.minimo
+          - ansible_facts.memtotal_mb is not defined
+        quiet: true
+
+    # --- Escena 5: primer nivel frente a ansible_facts, con la inyección y sin ella.
+    - name: Escena 5 — un fichero de vault (sin uso) para el ansible anidado
+      ansible.builtin.copy:
+        content: "sin-uso\n"
+        dest: "{{ entorno_57.ANSIBLE_VAULT_PASSWORD_FILE }}"
+        mode: "0600"
+      changed_when: false
+
+    - name: Escena 5 — escribir los dos interiores
+      ansible.builtin.copy:
+        content: "{{ item.content }}"
+        dest: "{{ dir_57 }}/{{ item.file }}"
+        mode: "0644"
+      loop:
+        - { file: primer_nivel.yml, content: "{{ primer_nivel }}" }
+        - { file: via_facts.yml, content: "{{ via_facts }}" }
+      loop_control:
+        label: "{{ item.file }}"
+      changed_when: false
+
+    - name: Escena 5 — correr cada interior con la inyección por defecto y apagada
+      ansible.builtin.command:
+        argv: ["ansible-playbook", "-i", "localhost,", "{{ dir_57 }}/{{ item.file }}",
+               "-e", "ansible_python_interpreter={{ ansible_playbook_python }}"]
+      loop:
+        - { id: primer_nivel, file: primer_nivel.yml, inyectar: {} }
+        - { id: primer_nivel_sin, file: primer_nivel.yml, inyectar: { ANSIBLE_INJECT_FACT_VARS: "False" } }
+        - { id: via_facts, file: via_facts.yml, inyectar: {} }
+        - { id: via_facts_sin, file: via_facts.yml, inyectar: { ANSIBLE_INJECT_FACT_VARS: "False" } }
+      loop_control:
+        label: "{{ item.id }}"
+      register: corridas
+      failed_when: false
+      changed_when: false
+      environment: "{{ entorno_57 | combine(item.inyectar) }}"
+
+    - name: Escena 5 — leer rc, avisos y mensajes
+      ansible.builtin.set_fact:
+        rc5: "{{ rc5 | default({}) | combine({item.item.id: item.rc}) }}"
+        aviso5: "{{ aviso5 | default({}) | combine({item.item.id: 'INJECT_FACTS_AS_VARS' in item.stderr}) }}"
+        salida5: "{{ salida5 | default({}) | combine({item.item.id: item.stdout ~ item.stderr}) }}"
+      loop: "{{ corridas.results }}"
+      loop_control:
+        label: "{{ item.item.id }}"
+
+    - name: Escena 5 — primer nivel avisa (stderr) y sin inyección se rompe; ansible_facts va en los dos
+      ansible.builtin.assert:
+        that:
+          - rc5.primer_nivel == 0 and aviso5.primer_nivel
+          - "'PRIMER-NIVEL=' in salida5.primer_nivel"
+          - rc5.primer_nivel_sin == 2
+          - "\"'ansible_hostname' is undefined\" in salida5.primer_nivel_sin"
+          - rc5.via_facts == 0 and not aviso5.via_facts
+          - rc5.via_facts_sin == 0 and not aviso5.via_facts_sin
+          - "'VIA-FACTS=' in salida5.via_facts_sin"
+        fail_msg: "{{ {'rc': rc5, 'aviso': aviso5} | to_json }}"
+        quiet: true
+
+    - name: Marca final (el CI la exige)
+      ansible.builtin.copy:
+        content: "facts a la carta: 5 escenas medidas (filter no ahorra, setup suma, primer nivel se acaba en 2.24)\n"
+        dest: "{{ dir_57 }}/TODAS-LAS-ESCENAS-OK"
+        mode: "0644"
+      changed_when: false
