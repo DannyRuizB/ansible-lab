@@ -1,0 +1,19 @@
+---
+# Cronómetro del playbook 57: una llamada a setup entre dos marcas de tiempo
+# tomadas en el controlador. Recibe `forma` (la etiqueta) y `filtro` o
+# `subset`; apunta cada medida en `tiempos_57[forma]`.
+
+- name: "Marca de salida ({{ forma }})"
+  ansible.builtin.set_fact:
+    t0_57: "{{ now().timestamp() }}"
+
+- name: "Recoger facts con setup ({{ forma }})"
+  ansible.builtin.setup:
+    filter: "{{ filtro | default(omit) }}"
+    gather_subset: "{{ subset | default(omit) }}"
+
+- name: "Apuntar el tiempo ({{ forma }})"
+  ansible.builtin.set_fact:
+    tiempos_57: >-
+      {{ tiempos_57 | default({}) | combine({forma: (tiempos_57 | default({})).get(forma, [])
+         + [now().timestamp() - (t0_57 | float)]}) }}

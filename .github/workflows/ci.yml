@@ -433,6 +433,14 @@ jobs:
           ansible-playbook playbooks/56_retry_files.yml
           test -f /tmp/ansible-lab-56/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
 
+      # Playbook 57: gather_subset en el play y en setup (registrado lleva el
+      # prefijo ansible_), filter que no ahorra (cronometrado), setup que suma
+      # y clear_facts, y los facts de primer nivel que se acaban en 2.24.
+      - name: "Playbook 57 — facts a la carta (asserts incluidos)"
+        run: |
+          ansible-playbook playbooks/57_facts_a_la_carta.yml
+          test -f /tmp/ansible-lab-57/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \
