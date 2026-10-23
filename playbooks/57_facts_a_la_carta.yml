@@ -23,10 +23,15 @@
 #
 #   - Escena 3 (LA TRAMPA, filter): `filter` recorta lo que VES, no lo que
 #     se recoge: setup ejecuta todos los colectores y luego tira lo que no
-#     casa. Medido: 1,1-1,2 s con `filter: default_ipv4` frente a 0,32 s con
-#     `!all` (con todo, 1,3-1,5 s). Acepta el nombre con o sin `ansible_` y
-#     comodines (`ansible_*_mb`), pero un punto (`ansible_default_ipv4.address`)
-#     no entra en el fact: devuelve NADA, sin error.
+#     casa. La prueba que no depende del reloj: un fact local ejecutable
+#     (facts.d, vía `fact_path`) deja una huella cada vez que el colector
+#     `local` corre — y con `filter: default_ipv4` corre, aunque solo vuelva
+#     default_ipv4; con `gather_subset` de solo red, no. El reloj lo
+#     confirma (informativo, no se exige: en el PC 1,2 s frente a 0,38 s de
+#     `!all`; en el runner del CI 0,8 frente a 0,47). Acepta el nombre con o
+#     sin `ansible_` y comodines (`ansible_*_mb`), pero un punto
+#     (`ansible_default_ipv4.address`) no entra en el fact: devuelve NADA,
+#     sin error.
 #
 #   - Escena 4 (setup suma, no reemplaza): tras recogerlo todo, un setup con
 #     `!all` deja los 118 facts — los de hardware siguen ahí, viejos — y el
@@ -101,6 +106,19 @@
               msg: "VIA-FACTS={{ ansible_facts.hostname }}"
 
   tasks:
+    - name: Empezar de cero
+      ansible.builtin.file:
+        path: "{{ dir_57 }}"
+        state: absent
+      changed_when: false
+
+    - name: Crear el directorio de trabajo (y el facts.d de la escena 3)
+      ansible.builtin.file:
+        path: "{{ dir_57 }}/facts.d"
+        state: directory
+        mode: "0755"
+      changed_when: false
+
     # --- Escena 2: un setup por subset; el resultado registrado es solo suyo.
     - name: Escena 2 — recoger con cada subset
       ansible.builtin.setup:
@@ -193,6 +211,54 @@
         fail_msg: "{{ filtradas | to_json }}"
         quiet: true
 
+    # La prueba que no depende del reloj: el colector `local` ejecuta los
+    # facts.d ejecutables, y esta sonda deja una huella cada vez que corre.
+    - name: Escena 3 — un fact local que deja huella al ejecutarse
+      ansible.builtin.copy:
+        content: |
+          #!/bin/sh
+          echo corrio >> {{ dir_57 }}/huella
+          echo '{"sonda": 1}'
+        dest: "{{ dir_57 }}/facts.d/sonda.fact"
+        mode: "0755"
+      changed_when: false
+
+    - name: Escena 3 — filter pidiendo solo default_ipv4, con la sonda en fact_path
+      ansible.builtin.setup:
+        filter: default_ipv4
+        fact_path: "{{ dir_57 }}/facts.d"
+      register: con_filtro
+
+    - name: Escena 3 — ¿corrió el colector local?
+      ansible.builtin.stat:
+        path: "{{ dir_57 }}/huella"
+      register: huella_filtro
+
+    - name: Escena 3 — borrar la huella
+      ansible.builtin.file:
+        path: "{{ dir_57 }}/huella"
+        state: absent
+      changed_when: false
+
+    - name: Escena 3 — gather_subset de solo red, con la misma sonda
+      ansible.builtin.setup:
+        gather_subset: ["!all", "!min", "network"]
+        fact_path: "{{ dir_57 }}/facts.d"
+
+    - name: Escena 3 — ¿y ahora?
+      ansible.builtin.stat:
+        path: "{{ dir_57 }}/huella"
+      register: huella_subset
+
+    - name: Escena 3 — con filter el colector corrió aunque solo volviera default_ipv4; con el subset, no
+      ansible.builtin.assert:
+        that:
+          - huella_filtro.stat.exists
+          - con_filtro.ansible_facts.keys() | reject('equalto', 'discovered_interpreter_python') | list == ['ansible_default_ipv4']
+          - not huella_subset.stat.exists
+        fail_msg: "huella con filter={{ huella_filtro.stat.exists }}, con subset={{ huella_subset.stat.exists }}"
+        quiet: true
+
     - name: Escena 3 — cronometrar filter frente a '!all', tres veces cada uno (alternados)
       ansible.builtin.include_tasks: tasks/57_cronometro.yml
       loop: "{{ [{'forma': 'filter', 'filtro': 'default_ipv4'}, {'forma': 'minimo', 'subset': ['!all']}] * 3 }}"
@@ -209,16 +275,11 @@
         mediana_filter: "{{ (tiempos_57.filter | sort)[1] | float | round(2) }}"
         mediana_minimo: "{{ (tiempos_57.minimo | sort)[1] | float | round(2) }}"
 
-    - name: Escena 3 — lo que costó cada uno
+    # Informativo: el reloj de un runner compartido no es una prueba (en el
+    # CI la diferencia fue 0,8 s frente a 0,47; en el PC, 1,2 frente a 0,38).
+    - name: Escena 3 — lo que costó cada uno (informativo)
       ansible.builtin.debug:
         msg: "filter default_ipv4: {{ mediana_filter }} s   gather_subset !all: {{ mediana_minimo }} s (medianas de 3)"
-
-    - name: Escena 3 — filter recorta lo que ves, no lo que se recoge (cuesta más que el mínimo)
-      ansible.builtin.assert:
-        that:
-          - mediana_filter | float > 1.5 * (mediana_minimo | float)
-        fail_msg: "filter {{ mediana_filter }} s frente a !all {{ mediana_minimo }} s"
-        quiet: true
 
     # --- Escena 4: setup suma; clear_facts vacía.
     - name: Escena 4 — recogerlo todo y luego solo el mínimo
@@ -258,19 +319,6 @@
         quiet: true
 
     # --- Escena 5: primer nivel frente a ansible_facts, con la inyección y sin ella.
-    - name: Escena 5 — empezar de cero
-      ansible.builtin.file:
-        path: "{{ dir_57 }}"
-        state: absent
-      changed_when: false
-
-    - name: Escena 5 — crear el directorio
-      ansible.builtin.file:
-        path: "{{ dir_57 }}"
-        state: directory
-        mode: "0755"
-      changed_when: false
-
     - name: Escena 5 — un fichero de vault (sin uso) para el ansible anidado
       ansible.builtin.copy:
         content: "sin-uso\n"
