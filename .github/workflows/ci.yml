@@ -450,6 +450,13 @@ jobs:
           ansible-playbook playbooks/58_become_a_medida.yml
           test -f /tmp/ansible-lab-58/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
 
+      # Playbook 59: async a fondo. Tarda ~30 s a propósito: espera a que el
+      # vigilante de async (async_wrapper) mate los trabajos en su tic de 5 s.
+      - name: "Playbook 59 — async a fondo (asserts incluidos)"
+        run: |
+          ansible-playbook playbooks/59_async_a_fondo.yml
+          test -f /tmp/ansible-lab-59/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \

@@ -1,0 +1,223 @@
+# =============================================================================
+# Playbook 59 — async a fondo: el límite que escribes no es el que se aplica
+#
+# El playbook 11 presenta `async` + `poll: 0` + `async_status`. Este mide lo
+# que queda debajo: quién mata el trabajo, cuándo, y quién se entera. Todo
+# medido con ansible-core 2.21 antes de escribirlo; cada escena es un
+# playbook interior con su propio ANSIBLE_ASYNC_DIR, y el trabajo deja un
+# sello por segundo durante 30 s para ver cuánto vivió de verdad:
+#
+#   - Escena 1 (LA TRAMPA, el límite va a saltos de 5 s): `async: N` no mata
+#     el trabajo a los N segundos. async_wrapper (el proceso que lo vigila)
+#     duerme 5 s, vuelve a dormir 5 s, resta y solo entonces mira si se pasó:
+#     el SIGKILL llega en el primer tic de 5 s después del límite, y 5 s más
+#     tarde de lo que parece. Medido: `async: 2` vivió 10 s; 5, 10 s; 6, 15 s;
+#     12, 20 s. Todo lo que el trabajo hace entre medias, se hace.
+#
+#   - Escena 2 (el controlador se rinde, el trabajo no): con `poll` > 0, el
+#     controlador deja de esperar al llegar al límite y la tarea falla — con
+#     un mensaje que despista: "async task produced unparsable results", no
+#     "tiempo agotado". Pero el trabajo sigue vivo hasta el tic del vigilante:
+#     la tarea ya ha fallado y el trabajo sigue escribiendo.
+#
+#   - Escena 3 (solo te enteras si preguntas): con `poll: 0` nadie mira. El
+#     vigilante deja en el fichero de resultados {"msg": "Timeout exceeded"},
+#     y `async_status` lo devuelve como fallo (finished, "Timeout exceeded").
+#     Cada trabajo deja SU fichero en el async_dir (~/.ansible_async por
+#     defecto) y nadie lo borra: se acumulan. `async_status mode: cleanup` lo
+#     borra, y desde ahí la pregunta es "could not find job".
+#
+# Regla de andar por casa: `async` es "como mucho N segundos, más hasta 10";
+# si el trabajo tiene efectos (escribe, borra, llama a una API), que se corte
+# él solo (`timeout 30 orden ...`) en vez de fiarse del límite; con `poll: 0`,
+# siempre un `async_status` después; y `mode: cleanup` cuando ya sabes cómo
+# acabó.
+#
+# Ejecutar:
+#   ansible-playbook playbooks/59_async_a_fondo.yml
+# ...el CI lo ejecuta esperando rc 0 y comprobando la marca final (tarda
+# medio minuto: tiene que esperar a que el vigilante mate los trabajos).
+# =============================================================================
+
+- name: "Escenas de async, medidas en playbooks interiores"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    dir_59: /tmp/ansible-lab-59
+    entorno_59:
+      ANSIBLE_ASYNC_DIR: /tmp/ansible-lab-59/async
+      ANSIBLE_VAULT_PASSWORD_FILE: /tmp/ansible-lab-59/vault_pass
+      ANSIBLE_NOCOLOR: "1"
+    base_59: >-
+      ansible-playbook -i localhost, -c local
+      -e ansible_python_interpreter={{ ansible_playbook_python }}
+      -e dir={{ dir_59 }}
+    # Escenas 1 y 2: un trabajo de 30 s que deja un sello por segundo, con el
+    # límite y el poll que pida cada corrida.
+    lanzar: !unsafe |
+      - name: lanzar
+        hosts: localhost
+        gather_facts: false
+        tasks:
+          - name: Un trabajo que deja un sello por segundo durante 30 s
+            ansible.builtin.shell: "for i in $(seq 1 30); do date +%s >> {{ dir }}/sellos-{{ id }}; sleep 1; done"
+            async: "{{ limite | int }}"
+            poll: "{{ espera | int }}"
+            register: j
+            ignore_errors: true
+          - name: Guardar lo visto
+            ansible.builtin.copy:
+              dest: "{{ dir }}/lanzar-{{ id }}.json"
+              mode: "0644"
+              content: "{{ {'jid': j.ansible_job_id | default(j.async_result.ansible_job_id | default('')),
+                            'failed': j.failed | default(false), 'msg': j.msg | default('')} | to_json }}"
+    # Escena 3: preguntar por un trabajo ya muerto, limpiarlo y volver a preguntar.
+    preguntar: !unsafe |
+      - name: preguntar
+        hosts: localhost
+        gather_facts: false
+        tasks:
+          - name: Preguntar por el trabajo
+            ansible.builtin.async_status:
+              jid: "{{ jid }}"
+            register: antes
+            ignore_errors: true
+          - name: Limpiar su fichero de resultados
+            ansible.builtin.async_status:
+              jid: "{{ jid }}"
+              mode: cleanup
+          - name: Preguntar otra vez
+            ansible.builtin.async_status:
+              jid: "{{ jid }}"
+            register: despues
+            ignore_errors: true
+          - name: Guardar lo visto
+            ansible.builtin.copy:
+              dest: "{{ dir }}/preguntar.json"
+              mode: "0644"
+              content: "{{ {'antes_failed': antes.failed, 'antes_finished': antes.finished | default(false),
+                            'antes_msg': antes.msg | default(''), 'despues_msg': despues.msg | default('')} | to_json }}"
+
+  tasks:
+    - name: Empezar con el directorio limpio
+      ansible.builtin.file:
+        path: "{{ dir_59 }}"
+        state: "{{ item }}"
+        mode: "0755"
+      loop: [absent, directory]
+      changed_when: false
+
+    - name: Escribir los interiores y un fichero de vault (sin uso) para el ansible anidado
+      ansible.builtin.copy:
+        content: "{{ item.content }}"
+        dest: "{{ dir_59 }}/{{ item.file }}"
+        mode: "{{ item.mode | default('0644') }}"
+      loop:
+        - { file: lanzar.yml, content: "{{ lanzar }}" }
+        - { file: preguntar.yml, content: "{{ preguntar }}" }
+        - { file: vault_pass, content: "sin-uso\n", mode: "0600" }
+      loop_control:
+        label: "{{ item.file }}"
+      changed_when: false
+
+    # ---- Escenas 1 y 2 -------------------------------------------------------
+    # a2 y a6: poll 0, límites 2 y 6 (vuelven al instante). p2: poll 1 y
+    # límite 2 (el controlador espera, se rinde y la tarea falla).
+    - name: "Escenas 1-2 — lanzar los tres trabajos"
+      ansible.builtin.command:
+        cmd: "{{ base_59 }} -e id={{ item.id }} -e limite={{ item.limite }} -e espera={{ item.espera }} {{ dir_59 }}/lanzar.yml"
+        chdir: "{{ dir_59 }}"
+      loop:
+        - { id: a2, limite: 2, espera: 0 }
+        - { id: a6, limite: 6, espera: 0 }
+        - { id: p2, limite: 2, espera: 1 }
+      loop_control:
+        label: "{{ item.id }}"
+      register: corridas
+      changed_when: false
+      environment: "{{ entorno_59 }}"
+
+    # El trabajo más largo (async 6) muere hacia los 15 s de empezar: con 22 s
+    # de margen todos han parado. Si alguno no muriera, seguiría hasta 30 s
+    # y el veredicto 1 lo diría.
+    - name: "Escenas 1-2 — esperar a que el vigilante haga su trabajo"
+      ansible.builtin.wait_for:
+        timeout: 22
+
+    - name: "Escenas 1-2 — cuánto vivió cada trabajo (sellos de un segundo)"
+      ansible.builtin.set_fact:
+        vivio: >-
+          {{ vivio | default({}) | combine({item: (lineas | last | int) - (lineas | first | int) + 1}) }}
+        lanzado: "{{ lanzado | default({}) | combine({item: lookup('ansible.builtin.file', dir_59 ~ '/lanzar-' ~ item ~ '.json') | from_json}) }}"
+      vars:
+        lineas: "{{ lookup('ansible.builtin.file', dir_59 ~ '/sellos-' ~ item).split('\n') | select | list }}"
+      loop: [a2, a6, p2]
+
+    - name: "Escena 3 — los ficheros de resultados que quedaron en el async_dir"
+      ansible.builtin.find:
+        paths: "{{ dir_59 }}/async"
+      register: ficheros_antes
+
+    - name: "Escena 3 — preguntar por el trabajo a2, limpiarlo y volver a preguntar"
+      ansible.builtin.command:
+        cmd: "{{ base_59 }} -e jid={{ lanzado.a2.jid }} {{ dir_59 }}/preguntar.yml"
+        chdir: "{{ dir_59 }}"
+      changed_when: false
+      environment: "{{ entorno_59 }}"
+
+    - name: "Escena 3 — y después de limpiar"
+      ansible.builtin.find:
+        paths: "{{ dir_59 }}/async"
+      register: ficheros_despues
+
+    - name: Leer lo que vio la escena 3
+      ansible.builtin.set_fact:
+        visto_tres: "{{ lookup('ansible.builtin.file', dir_59 ~ '/preguntar.json') | from_json }}"
+
+    - name: "Veredicto 1 — async: N no mata a los N segundos, sino en el primer tic de 5 s después"
+      ansible.builtin.assert:
+        that:
+          # Muertos, pero mucho después del límite (medido: 10 s y 15 s).
+          - vivio.a2 >= 8 and vivio.a2 < 30
+          - vivio.a6 >= 13 and vivio.a6 < 30
+          # El tic es de 5 s: un segundo más de límite, cinco más de vida.
+          - vivio.a6 - vivio.a2 >= 4
+        success_msg: "async: 2 vivió {{ vivio.a2 }} s y async: 6, {{ vivio.a6 }} s (el vigilante mira cada 5 s)"
+        fail_msg: "{{ vivio | to_json }}"
+
+    - name: "Veredicto 2 — con poll > 0 el controlador se rinde en el límite; el trabajo sigue"
+      ansible.builtin.assert:
+        that:
+          - lanzado.p2.failed
+          # La corrida entera (arrancar ansible, esperar, rendirse) en < 9 s.
+          - corridas.results[2].delta is match('0:00:0[0-8]')
+          - vivio.p2 >= 8
+        success_msg: >-
+          la tarea falló con "{{ lanzado.p2.msg }}" ({{ corridas.results[2].delta }} de corrida)
+          y el trabajo vivió {{ vivio.p2 }} s
+        fail_msg: "{{ lanzado.p2 | to_json }} {{ corridas.results[2].delta }} {{ vivio | to_json }}"
+
+    - name: "Veredicto 3 — solo te enteras si preguntas; los ficheros se acumulan hasta que limpias"
+      ansible.builtin.assert:
+        that:
+          # Un fichero por trabajo, y nadie los borra.
+          - ficheros_antes.matched == 3
+          # El muerto por el vigilante: fallo, terminado y "Timeout exceeded".
+          - visto_tres.antes_failed
+          - visto_tres.antes_finished
+          - visto_tres.antes_msg == 'Timeout exceeded'
+          # cleanup lo borra, y desde ahí el trabajo no existe.
+          - ficheros_despues.matched == 2
+          - visto_tres.despues_msg == 'could not find job'
+        success_msg: >-
+          async_status: "{{ visto_tres.antes_msg }}"; ficheros {{ ficheros_antes.matched }} -> {{ ficheros_despues.matched }}
+          tras cleanup; después: "{{ visto_tres.despues_msg }}"
+        fail_msg: "{{ visto_tres | to_json }} {{ ficheros_antes.matched }} {{ ficheros_despues.matched }}"
+
+    - name: Dejar la marca final
+      ansible.builtin.copy:
+        content: "ok\n"
+        dest: "{{ dir_59 }}/TODAS-LAS-ESCENAS-OK"
+        mode: "0644"
+      changed_when: false
