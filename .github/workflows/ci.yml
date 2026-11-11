@@ -442,6 +442,14 @@ jobs:
           ansible-playbook playbooks/57_facts_a_la_carta.yml
           test -f /tmp/ansible-lab-57/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
 
+      # Playbook 58: become plugin a medida (la undécima extensión). El runner
+      # corre sin root, así que la escena 5 (become a un usuario sin
+      # privilegios, sin ACLs ni pipelining) se mide aquí de verdad.
+      - name: "Playbook 58 — become plugin a medida (asserts incluidos)"
+        run: |
+          ansible-playbook playbooks/58_become_a_medida.yml
+          test -f /tmp/ansible-lab-58/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
+
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
           google-chrome --headless=new --no-sandbox --hide-scrollbars \
