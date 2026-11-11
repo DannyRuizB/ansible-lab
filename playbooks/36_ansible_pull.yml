@@ -49,7 +49,7 @@
     git_36: git -c user.email=lab@ansible-lab -c user.name=ansible-lab
     # fqdn y hostname corto pueden coincidir (o no) segun la maquina: se
     # generan LOS DOS nombres que ansible-pull va a probar y listo.
-    nombres_de_host_36: "{{ [ansible_fqdn, ansible_hostname] | unique }}"
+    nombres_de_host_36: "{{ [ansible_facts.fqdn, ansible_facts.hostname] | unique }}"
     # TRAMPA AMBIENTAL (la cazo el CI): un ansible anidado HEREDA el entorno,
     # y una ANSIBLE_VAULT_PASSWORD_FILE en ruta RELATIVA (como la exporta el
     # workflow) se resuelve contra el cwd del anidado — que no es el repo — y

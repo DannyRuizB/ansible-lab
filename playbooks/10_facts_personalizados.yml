@@ -2,7 +2,7 @@
 # =============================================================================
 # Playbook 10 — Facts personalizados (facts.d): enséñale a Ansible datos tuyos
 #
-# Los facts de serie (ansible_hostname, ansible_memtotal_mb...) los inventa
+# Los facts de serie (ansible_facts.hostname, .memtotal_mb...) los inventa
 # Ansible. Los facts LOCALES los inventas tú: ficheros en un directorio
 # facts.d del nodo gestionado que el gather recoge y cuelga de
 # `ansible_local.<nombre>`. Hay dos sabores:
@@ -28,8 +28,8 @@
 
 - name: Facts personalizados — facts.d estático y ejecutable
   hosts: laboratorio
-  # A propósito: sin gather inicial. Así se ve que ansible_local NO existe
-  # hasta que alguien recolecta facts, ni siquiera en una segunda ejecución.
+  # A propósito: sin gather inicial. Así se ve que los facts locales NO
+  # existen hasta que alguien recolecta, ni siquiera en una segunda ejecución.
   gather_facts: false
 
   vars:
@@ -38,12 +38,21 @@
     app_version: "2.0.0"
 
   tasks:
-    - name: Comprobar que ansible_local aún no existe (nadie ha recolectado)
+    # OJO: aquí antes se comprobaba `ansible_local is not defined`, y en
+    # ansible-core 2.24 eso falla. El lab ya vive así (inject_facts_as_vars =
+    # False en ansible.cfg): ansible_local es el ÚNICO fact que se queda en
+    # primer nivel, y se queda existiendo SIEMPRE — `{}` antes de recoger
+    # nada. Con la inyección de hoy no está definido. Ningún aviso lo anuncia:
+    # es el único fact exento del de deprecación. Lo que vale en los dos
+    # mundos: ansible_facts.ansible_local, o mirar si está vacío (playbook 57,
+    # escena 6).
+    - name: Comprobar que aún no hay facts locales (nadie ha recolectado)
       ansible.builtin.assert:
         that:
-          - ansible_local is not defined
-        success_msg: "ansible_local no está definido: sin gather no hay facts locales"
-        fail_msg: "ansible_local no debería existir todavía con gather_facts: false"
+          - ansible_facts.ansible_local is not defined
+          - ansible_local | default({}) | length == 0
+        success_msg: "Sin gather no hay facts locales (ansible_local = {{ ansible_local | default('sin definir') }})"
+        fail_msg: "No debería haber facts locales todavía con gather_facts: false"
 
     - name: Crear el directorio facts.d del laboratorio
       ansible.builtin.file:

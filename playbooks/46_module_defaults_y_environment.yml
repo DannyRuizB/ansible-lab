@@ -33,7 +33,7 @@
 #
 #   - Escena 6 (environment es del proceso REMOTO): `lookup('env', ...)` corre
 #     en el controlador y no ve el environment de la tarea (sale vacío). Y el
-#     de la play sí llega a gather_facts: `ansible_env` lo trae.
+#     de la play sí llega a gather_facts: `ansible_facts.env` lo trae.
 #
 # Y un efecto secundario que también se mide: ansible-lint NO lee
 # module_defaults. Las tareas sin `mode` de las escenas 1-3 las marca como
@@ -237,11 +237,11 @@
       ansible.builtin.assert:
         that:
           - lookup_s6 == 'VACIO'
-          - ansible_env.LAB46_A | default('NO') == 'play'
+          - ansible_facts.env.LAB46_A | default('NO') == 'play'
         success_msg: >-
           lookup('env') devolvió {{ lookup_s6 }}: se ejecuta en el controlador y no ve el
           environment de la tarea. En cambio gather_facts corrió con el de la play:
-          ansible_env.LAB46_A={{ ansible_env.LAB46_A }}.
+          ansible_facts.env.LAB46_A={{ ansible_facts.env.LAB46_A }}.
         fail_msg: "environment no se comportó como se midió (escena 6): lookup={{ lookup_s6 }}"
 
     - name: Dejar la marca final para el CI (todas las escenas pasaron)
