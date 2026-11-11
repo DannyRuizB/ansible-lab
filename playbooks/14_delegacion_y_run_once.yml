@@ -82,12 +82,12 @@
   tasks:
     - name: "Antes de nada: web1 sabe que es web1"
       ansible.builtin.assert:
-        that: ansible_hostname == 'web1'
+        that: ansible_facts.hostname == 'web1'
         quiet: true
 
     # LA TRAMPA: setup delegado SIN delegate_facts. La tarea corre en db1,
     # pero los facts devueltos se asignan al host que delega... y web1 pasa
-    # a creerse db1. Cualquier template posterior ({{ ansible_hostname }},
+    # a creerse db1. Cualquier template posterior ({{ ansible_facts.hostname }},
     # rutas, configs) sale con datos del host equivocado.
     - name: Recoger facts de db1 SIN delegate_facts (contaminación)
       ansible.builtin.setup:
@@ -95,8 +95,8 @@
 
     - name: "Comprobar la contaminación: web1 ahora se cree db1"
       ansible.builtin.assert:
-        that: ansible_hostname == 'db1'
-        success_msg: "Contaminado, como avisa la doc: ansible_hostname={{ ansible_hostname }} en web1"
+        that: ansible_facts.hostname == 'db1'
+        success_msg: "Contaminado, como avisa la doc: ansible_facts.hostname={{ ansible_facts.hostname }} en web1"
         fail_msg: "Se esperaba la contaminación clásica y no ocurrió"
 
     # LO CORRECTO: delegate_facts: true → los facts de db1 van a
@@ -112,8 +112,8 @@
     - name: "Comprobar: cada uno vuelve a ser quien era"
       ansible.builtin.assert:
         that:
-          - ansible_hostname == 'web1'
-          - hostvars['db1'].ansible_hostname == 'db1'
+          - ansible_facts.hostname == 'web1'
+          - hostvars['db1'].ansible_facts.hostname == 'db1'
         success_msg: "web1 es web1 otra vez y hostvars['db1'] tiene los facts de db1"
         fail_msg: "Los facts no quedaron donde debían"
 
