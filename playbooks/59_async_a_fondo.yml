@@ -44,13 +44,31 @@
 #     defecto) y nadie lo borra: se acumulan. `async_status mode: cleanup` lo
 #     borra, y desde ahí la pregunta es "could not find job".
 #
+#   - Escena 4 ("Timeout exceeded" no quiere decir muerto): el vigilante hace
+#     fork y DESPUÉS mete al hijo en su propio grupo de procesos
+#     (os.setpgid), que es a donde manda el SIGKILL (os.killpg). Si el hijo
+#     llega antes a lanzar el módulo, el módulo y su shell se quedan en el
+#     grupo viejo: el SIGKILL solo mata al hijo de Python, el trabajo sigue
+#     hasta acabar, y el fichero de resultados dice "Timeout exceeded" igual.
+#     Es una carrera: el CI la cazó una vez (async 2 vivió 30 s con la
+#     2.21.1, en main, tras pasar en la PR) y en local no salió en 20
+#     intentos con un núcleo saturado. Para verla siempre, esta escena copia
+#     el async_wrapper de la versión que corre, le añade un sleep(0.5) antes
+#     del setpgid (el hijo gana siempre) y lo carga con ANSIBLE_LIBRARY solo
+#     en su playbook interior (en un directorio que NO se llame library/:
+#     el library/ que hay junto a un playbook se carga por su cuenta, y pisa los
+#     módulos internos como async_wrapper). Mismo código de 2.20.7 a 2.22.0; si una
+#     versión lo cambia, la copia no se puede preparar y el veredicto 4 lo
+#     dice. Las escenas 1-2 toleran que UNO de sus trabajos se escape así
+#     (lo cuentan en el mensaje); dos ya no es esta carrera.
+#
 # Regla de andar por casa: `async: N` es "como mucho hasta el siguiente
 # múltiplo de 5" con el vigilante nuevo (y "N + hasta 10 s" con el viejo),
-# así que mira `ansible --version` antes de fiarte; si el trabajo tiene
-# efectos (escribe, borra, llama a una API), que se corte él solo
-# (`timeout 30 orden ...`) en vez de fiarse del límite; con `poll: 0`,
-# siempre un `async_status` después; y `mode: cleanup` cuando ya sabes cómo
-# acabó.
+# así que mira `ansible --version` antes de fiarte; y "Timeout exceeded" no
+# prueba que el trabajo haya muerto. Si el trabajo tiene efectos (escribe,
+# borra, llama a una API), que se corte él solo (`timeout 30 orden ...`) en
+# vez de fiarse del límite; con `poll: 0`, siempre un `async_status`
+# después; y `mode: cleanup` cuando ya sabes cómo acabó.
 #
 # Los interiores se lanzan con el MISMO ansible que este playbook
 # (`<python> -m ansible.cli.playbook`), no con el `ansible-playbook` del
@@ -97,6 +115,11 @@
       - { id: a2, limite: 2, espera: 0 }
       - { id: a6, limite: 6, espera: 0 }
       - { id: p6, limite: 6, espera: 3 }
+    # Escena 4: como a2, pero con el vigilante que pierde la carrera.
+    escena_4: { id: e4, limite: 2, espera: 0 }
+    # Lo más que vive un trabajo al que mata el vigilante es 15 s (+1 de
+    # sellos); el que vive 25 o más se ha escapado (escena 4).
+    vida_de_escapado: 25
     # Escenas 1 y 2: un trabajo de 30 s que deja un sello por segundo, con el
     # límite y el poll que pida cada corrida. Al acabar la tarea (bien o mal)
     # se apunta la hora, para contar los sellos que llegan DESPUÉS del fallo.
@@ -118,7 +141,7 @@
               content: "{{ {'jid': j.ansible_job_id | default(j.async_result.ansible_job_id | default('')),
                             'failed': j.failed | default(false), 'msg': j.msg | default(''),
                             'fin': lookup('ansible.builtin.pipe', 'date +%s') | int} | to_json }}"
-    # Escena 3: preguntar por un trabajo ya muerto, limpiarlo y volver a preguntar.
+    # Escenas 3 y 4: preguntar por un trabajo, limpiarlo y volver a preguntar.
     preguntar: !unsafe |
       - name: preguntar
         hosts: localhost
@@ -140,7 +163,7 @@
             ignore_errors: true
           - name: Guardar lo visto
             ansible.builtin.copy:
-              dest: "{{ dir }}/preguntar.json"
+              dest: "{{ dir }}/preguntar-{{ id }}.json"
               mode: "0644"
               content: "{{ {'antes_failed': antes.failed, 'antes_finished': antes.finished | default(false),
                             'antes_msg': antes.msg | default(''), 'despues_msg': despues.msg | default('')} | to_json }}"
@@ -152,6 +175,16 @@
         state: "{{ item }}"
         mode: "0755"
       loop: [absent, directory]
+      changed_when: false
+
+    # NO puede llamarse library/: ansible añade por su cuenta el library/ que hay junto
+    # al playbook, y los interiores viven en dir_59 — TODOS usarían el
+    # vigilante tramposo (medido: a2, a6 y p6 vivieron 30 s).
+    - name: Y el directorio del vigilante tramposo de la escena 4
+      ansible.builtin.file:
+        path: "{{ dir_59 }}/vigilante-que-pierde"
+        state: directory
+        mode: "0755"
       changed_when: false
 
     - name: Escribir los interiores y un fichero de vault (sin uso) para el ansible anidado
@@ -192,14 +225,64 @@
       changed_when: false
       environment: "{{ entorno_59 }}"
 
-    # El que más vive (async 6, vigilante viejo) muere hacia los 15 s de empezar:
-    # con 22 s de margen todos han parado. Si alguno no muriera, seguiría
-    # hasta 30 s y el veredicto 1 lo diría.
-    - name: "Escenas 1-2 — esperar a que el vigilante haga su trabajo"
+    # ---- Escena 4: el vigilante que pierde la carrera -------------------------
+    - name: "Escena 4 — dónde está el async_wrapper de esta versión"
+      ansible.builtin.command:
+        cmd: "{{ ansible_playbook_python }} -c 'import ansible.modules.async_wrapper as w; print(w.__file__)'"
+      register: vigilante_original
+      changed_when: false
+
+    - name: "Escena 4 — copiarlo aparte"
+      ansible.builtin.copy:
+        src: "{{ vigilante_original.stdout }}"
+        dest: "{{ dir_59 }}/vigilante-que-pierde/async_wrapper.py"
+        remote_src: true
+        mode: "0644"
+      changed_when: false
+
+    # El hijo tarda milisegundos en lanzar el módulo; medio segundo de
+    # retraso en el setpgid hace que gane siempre.
+    - name: "Escena 4 — que el vigilante espere 0,5 s antes de su setpgid"
+      ansible.builtin.replace:
+        path: "{{ dir_59 }}/vigilante-que-pierde/async_wrapper.py"
+        regexp: '^(\s+)(os\.setpgid\(sub_pid, sub_pid\))$'
+        replace: '\1time.sleep(0.5)  # lab 59: el hijo gana la carrera\n\1\2'
+      register: carrera_forzada
+      changed_when: false
+
+    - name: "Escena 4 — lanzar un trabajo como a2 con ese vigilante"
+      ansible.builtin.command:
+        cmd: >-
+          {{ base_59 }} -e id={{ escena_4.id }} -e limite={{ escena_4.limite }}
+          -e espera={{ escena_4.espera }} {{ dir_59 }}/lanzar.yml
+        chdir: "{{ dir_59 }}"
+      changed_when: false
+      environment: "{{ entorno_59 | combine({'ANSIBLE_LIBRARY': dir_59 ~ '/vigilante-que-pierde'}) }}"
+
+    # El que más vive (async 6, vigilante viejo) muere hacia los 15 s de
+    # empezar: con 22 s de margen todos han parado. e4 no muere: vive sus 30 s.
+    - name: "Escenas 1-4 — esperar a que el vigilante haga su trabajo"
       ansible.builtin.wait_for:
         timeout: 22
 
-    - name: "Escenas 1-2 — cuánto vivió cada trabajo (sellos de un segundo)"
+    # Lo primero tras la espera, mientras e4 sigue vivo (le quedan ~7 s).
+    - name: "Escena 4 — ¿sigue vivo el trabajo al que el vigilante ya mandó el SIGKILL?"
+      ansible.builtin.command:
+        cmd: "pgrep -f {{ dir_59 }}/sellos-e[4]"
+      register: e4_vivo
+      changed_when: false
+      failed_when: e4_vivo.rc not in [0, 1]
+
+    - name: "Escena 4 — y qué dice async_status de él"
+      ansible.builtin.command:
+        cmd: "{{ base_59 }} -e id={{ escena_4.id }} -e jid={{ jid_e4 }} {{ dir_59 }}/preguntar.yml"
+        chdir: "{{ dir_59 }}"
+      vars:
+        jid_e4: "{{ (lookup('ansible.builtin.file', dir_59 ~ '/lanzar-e4.json') | from_json).jid }}"
+      changed_when: false
+      environment: "{{ entorno_59 }}"
+
+    - name: "Escenas 1-4 — cuánto vivió cada trabajo (sellos de un segundo)"
       ansible.builtin.set_fact:
         vivio: >-
           {{ vivio | default({}) | combine({item.id: (sellos | last | int) - (sellos | first | int) + 1}) }}
@@ -208,9 +291,17 @@
         sellos_de: "{{ sellos_de | default({}) | combine({item.id: sellos}) }}"
       vars:
         sellos: "{{ lookup('ansible.builtin.file', dir_59 ~ '/sellos-' ~ item.id).split('\n') | select | map('int') | list }}"
-      loop: "{{ trabajos }}"
+      loop: "{{ trabajos + [escena_4] }}"
       loop_control:
         label: "{{ item.id }}"
+
+    # Nadie más lo va a parar: el vigilante cree que ya lo hizo.
+    - name: "Escena 4 — parar el trabajo escapado"
+      ansible.builtin.command:
+        cmd: "pkill -f {{ dir_59 }}/sellos-e[4]"
+      register: e4_parado
+      changed_when: false
+      failed_when: e4_parado.rc not in [0, 1]
 
     - name: "Escena 3 — los ficheros de resultados que quedaron en el async_dir"
       ansible.builtin.find:
@@ -219,7 +310,7 @@
 
     - name: "Escena 3 — preguntar por el trabajo a2, limpiarlo y volver a preguntar"
       ansible.builtin.command:
-        cmd: "{{ base_59 }} -e jid={{ lanzado.a2.jid }} {{ dir_59 }}/preguntar.yml"
+        cmd: "{{ base_59 }} -e id=a2 -e jid={{ lanzado.a2.jid }} {{ dir_59 }}/preguntar.yml"
         chdir: "{{ dir_59 }}"
       changed_when: false
       environment: "{{ entorno_59 }}"
@@ -229,30 +320,39 @@
         paths: "{{ dir_59 }}/async"
       register: ficheros_despues
 
-    - name: Leer lo que vio la escena 3
+    - name: Leer lo que vieron las escenas 3 y 4
       ansible.builtin.set_fact:
-        visto_tres: "{{ lookup('ansible.builtin.file', dir_59 ~ '/preguntar.json') | from_json }}"
+        visto_tres: "{{ lookup('ansible.builtin.file', dir_59 ~ '/preguntar-a2.json') | from_json }}"
+        visto_cuatro: "{{ lookup('ansible.builtin.file', dir_59 ~ '/preguntar-e4.json') | from_json }}"
         # Sellos que p6 escribió después de que su tarea ya hubiera fallado.
         tras_el_fallo: "{{ sellos_de.p6 | select('gt', lanzado.p6.fin) | list | length }}"
+        # Trabajos de las escenas 1-2 que se escaparon por la carrera de la 4.
+        escapados: >-
+          {{ vivio | dict2items | rejectattr('key', 'eq', escena_4.id)
+             | selectattr('value', 'ge', vida_de_escapado) | map(attribute='key') | list }}
 
     - name: "Veredicto 1 — async: N no mata a los N segundos: mata el tic del vigilante"
       ansible.builtin.assert:
         that:
+          # La carrera de la escena 4 puede dejar escapar a UNO (vive sus
+          # 30 s); dos en la misma corrida ya sería otra cosa.
+          - escapados | length <= 1
           # Cada trabajo vivió lo que predice el código de esta versión
           # (los sellos son de un segundo: -2/+1 de margen).
-          - vivio.a2 >= prediccion.a2 - 2 and vivio.a2 <= prediccion.a2 + 1
-          - vivio.a6 >= prediccion.a6 - 2 and vivio.a6 <= prediccion.a6 + 1
+          - "'a2' in escapados or (vivio.a2 >= prediccion.a2 - 2 and vivio.a2 <= prediccion.a2 + 1)"
+          - "'a6' in escapados or (vivio.a6 >= prediccion.a6 - 2 and vivio.a6 <= prediccion.a6 + 1)"
           # La trampa que sobrevive al arreglo: un límite de 6 deja vivir
           # 10 s (15 s con el vigilante viejo).
           - vivio.a6 - 6 >= 3
           # Lo que arregló el vigilante nuevo: con N <= 5, el límite es el
           # que escribes; con el viejo, `async: 2` vivía 10 s.
-          - (vivio.a2 <= 3) if vigilante_nuevo else (vivio.a2 >= 8)
+          - "'a2' in escapados or ((vivio.a2 <= 3) if vigilante_nuevo else (vivio.a2 >= 8))"
         success_msg: >-
           ansible-core {{ version_59 }} (vigilante {{ 'nuevo' if vigilante_nuevo else 'viejo' }}):
           async 2 vivió {{ vivio.a2 }} s (predicción {{ prediccion.a2 }})
-          y async 6, {{ vivio.a6 }} s (predicción {{ prediccion.a6 }})
-        fail_msg: "{{ version_59 }} vivió {{ vivio | to_json }} y se predijo {{ prediccion | to_json }}"
+          y async 6, {{ vivio.a6 }} s (predicción {{ prediccion.a6 }}){{
+          '' if escapados | length == 0 else '; se escapó ' ~ escapados | join(', ') ~ ' (la carrera de la escena 4)' }}
+        fail_msg: "{{ version_59 }} vivió {{ vivio | to_json }} y se predijo {{ prediccion | to_json }}; escapados {{ escapados }}"
 
     - name: "Veredicto 2 — con poll > 0 el controlador se rinde en el límite; el trabajo sigue"
       ansible.builtin.assert:
@@ -262,7 +362,7 @@
           # sello basta para probarlo; medido: 2 con el vigilante nuevo, 8
           # con el viejo).
           - tras_el_fallo | int >= 1
-          - vivio.p6 >= prediccion.p6 - 2 and vivio.p6 <= prediccion.p6 + 1
+          - "'p6' in escapados or (vivio.p6 >= prediccion.p6 - 2 and vivio.p6 <= prediccion.p6 + 1)"
           # El mensaje: la rama 2.21 despista; 2.20 y 2.22 dicen lo que pasa.
           - >-
             lanzado.p6.msg is search('unparsable results' if mensaje_que_despista
@@ -288,6 +388,26 @@
           async_status: "{{ visto_tres.antes_msg }}"; ficheros {{ ficheros_antes.matched }} -> {{ ficheros_despues.matched }}
           tras cleanup; después: "{{ visto_tres.despues_msg }}"
         fail_msg: "{{ visto_tres | to_json }} {{ ficheros_antes.matched }} {{ ficheros_despues.matched }}"
+
+    - name: "Veredicto 4 — 'Timeout exceeded' no quiere decir muerto: si el vigilante pierde la carrera, el SIGKILL no llega"
+      ansible.builtin.assert:
+        that:
+          # La copia se pudo preparar: este vigilante hace el setpgid DESPUÉS
+          # del fork (si una versión lo cambia, aquí se ve).
+          - carrera_forzada.msg is match('1 replacements made')
+          # async_status lo da por muerto...
+          - visto_cuatro.antes_failed
+          - visto_cuatro.antes_finished
+          - visto_cuatro.antes_msg == 'Timeout exceeded'
+          # ...y el trabajo seguía vivo y escribiendo mucho después del tic.
+          - e4_vivo.rc == 0
+          - vivio.e4 >= prediccion.a2 + 8
+        success_msg: >-
+          async_status dijo "{{ visto_cuatro.antes_msg }}" y el trabajo seguía vivo: {{ vivio.e4 }} s de sellos
+          cuando el vigilante mandó su SIGKILL hacia los {{ prediccion.a2 }} s (lo paró el playbook, no él)
+        fail_msg: >-
+          reemplazo: "{{ carrera_forzada.msg }}"; async_status {{ visto_cuatro | to_json }};
+          pgrep rc {{ e4_vivo.rc }}; vivió {{ vivio.e4 }} s
 
     - name: Dejar la marca final
       ansible.builtin.copy:
