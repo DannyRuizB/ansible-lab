@@ -450,12 +450,28 @@ jobs:
           ansible-playbook playbooks/58_become_a_medida.yml
           test -f /tmp/ansible-lab-58/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
 
-      # Playbook 59: async a fondo. Tarda ~30 s a propósito: espera a que el
-      # vigilante de async (async_wrapper) mate los trabajos en su tic de 5 s.
+      # Playbook 59: async a fondo. Tarda ~35 s a propósito: espera a que el
+      # vigilante de async (async_wrapper) mate los trabajos en su tic. Lo que
+      # mide depende de la versión exacta de ansible-core, así que corre tres
+      # veces: con la del runner (ubuntu-26.04 trae 2.21.5: vigilante nuevo y
+      # mensaje que despista) y con 2.21.1 (vigilante viejo) y 2.22.0 (mensaje
+      # arreglado) en venvs aparte. Entre las tres pasan por las dos ramas de
+      # cada predicción del playbook.
       - name: "Playbook 59 — async a fondo (asserts incluidos)"
         run: |
+          ansible --version | head -1
           ansible-playbook playbooks/59_async_a_fondo.yml
           test -f /tmp/ansible-lab-59/TODAS-LAS-ESCENAS-OK || { echo "::error::el veredicto no dejó la marca final"; exit 1; }
+
+      - name: "Playbook 59 con ansible-core 2.21.1 y 2.22.0 (antes y después de los arreglos)"
+        run: |
+          for v in 2.21.1 2.22.0; do
+            python3 -m venv "$RUNNER_TEMP/ac-$v"
+            "$RUNNER_TEMP/ac-$v/bin/pip" install -q "ansible-core==$v"
+            "$RUNNER_TEMP/ac-$v/bin/ansible" --version | head -1
+            "$RUNNER_TEMP/ac-$v/bin/ansible-playbook" playbooks/59_async_a_fondo.yml
+            test -f /tmp/ansible-lab-59/TODAS-LAS-ESCENAS-OK || { echo "::error::$v: el veredicto no dejó la marca final"; exit 1; }
+          done
 
       - name: Capturar el panel en PNG (Chrome del runner)
         run: |
